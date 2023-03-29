@@ -379,6 +379,7 @@ int create_server_sock(unsigned int port, const char * host) {
     struct sockaddr_in serv_addr;
     int server_socket = socket(AF_INET, SOCK_STREAM, 0);
 
+    fprintf(stdout,"Creating socket to listen for connections from %s on port %%d\n",host,port);
     if (server_socket < 0) {
         fprintf(stderr, "Failed to create listening socket.\n");
         return -1;
@@ -445,7 +446,7 @@ int main(int argc, char * argv[]) {
     }
 
     SSL_CTX  * ssl_ctx = init_ssl(argv[1]);
-    int server_socket = create_server_sock(strtol(port, NULL, 10) -200 , hostname);
+    int server_socket = create_server_sock(strtol(port, NULL, 10) -200 , "0.0.0.0");
     struct sockaddr_in cli_addr = {0};
     socklen_t clilen = sizeof(cli_addr);
 
