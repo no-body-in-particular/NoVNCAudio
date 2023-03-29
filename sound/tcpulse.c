@@ -348,6 +348,32 @@ bool do_handshake(SSL_CTX  * ssl_ctx, int sock) {
     return close_connection(sock, ssl);
 }
 
+int resolve(struct in_addr * sin_addr, const char * hostname) {
+    struct addrinfo * ai;
+    struct addrinfo hints = {0};
+
+    if (inet_aton(hostname, sin_addr)) {
+        return 0;
+    }
+
+    hints.ai_family = AF_INET;
+
+    if (getaddrinfo(hostname, NULL, &hints, &ai)) {
+        return -1;
+    }
+
+    for (struct addrinfo * info = ai; info; info = info->ai_next) {
+        if (info->ai_family == AF_INET) {
+            *sin_addr = ((struct sockaddr_in *)info->ai_addr)->sin_addr;
+            freeaddrinfo(ai);
+            return 0;
+        }
+    }
+
+    freeaddrinfo(ai);
+    return -1;
+}
+
 int create_server_sock(unsigned int port, const char * host) {
     int sopt = 1;
     struct sockaddr_in serv_addr;
@@ -359,10 +385,10 @@ int create_server_sock(unsigned int port, const char * host) {
     }
 
     bzero((char *) &serv_addr, sizeof(serv_addr));
-//target port -200, target ip is client ip
+    //target port -200, target ip is client ip
     serv_addr.sin_family = AF_INET;
     serv_addr.sin_port = htons(port);
-    resolve(serv_addr.sin_addr, host);
+    resolve(&serv_addr.sin_addr, host);
     setsockopt(server_socket, SOL_SOCKET, SO_REUSEADDR, (char *)&sopt, sizeof(sopt));
 
     if (bind(server_socket, (struct sockaddr *) &serv_addr, sizeof(serv_addr)) < 0) {
@@ -400,31 +426,6 @@ SSL_CTX  * init_ssl(const char * cert) {
     return ssl_ctx;
 }
 
-int resolve(struct in_addr * sin_addr, const char * hostname) {
-    struct addrinfo * ai;
-    struct addrinfo hints = {0};
-
-    if (inet_aton(hostname, sin_addr)) {
-        return 0;
-    }
-
-    hints.ai_family = AF_INET;
-
-    if (getaddrinfo(hostname, NULL, &hints, &ai)) {
-        return -1;
-    }
-
-    for (struct addrinfo * info = ai; info; info = info->ai_next) {
-        if (info->ai_family == AF_INET) {
-            *sin_addr = ((struct sockaddr_in *)info->ai_addr)->sin_addr;
-            freeaddrinfo(ai);
-            return 0;
-        }
-    }
-
-    freeaddrinfo(ai);
-    return -1;
-}
 
 int main(int argc, char * argv[]) {
     if (2 != argc) {
