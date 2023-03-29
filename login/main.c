@@ -20,6 +20,5 @@ int main() {
 
     fgets(file_buffer, 511, file); //read password
     fclose(file);
-    fprintf(stdout, "%s %s\n", buffer, file_buffer);
     return strcmp(buffer, file_buffer);
 }

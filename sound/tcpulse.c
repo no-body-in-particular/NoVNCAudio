@@ -172,7 +172,6 @@ int popen2(const char * cmdline,   int  * from_child, int * to_child) {
 
     fprintf(stdout, "pipe_stdin[0] = %d, pipe_stdin[1] = %d\n", pipe_stdin[0], pipe_stdin[1]);
     fprintf(stdout, "pipe_stdout[0] = %d, pipe_stdout[1] = %d\n", pipe_stdout[0], pipe_stdout[1]);
-
     p = fork();
 
     if (p < 0) {
@@ -349,18 +348,7 @@ bool do_handshake(SSL_CTX  * ssl_ctx, int sock) {
     return close_connection(sock, ssl);
 }
 
-void signal_handler(int sig) {
-    switch (sig) {
-        case SIGHUP:
-            break;
-
-        case SIGTERM:
-            exit(0);
-            break;
-    }
-}
-
-int create_server_sock(unsigned int port) {
+int create_server_sock(unsigned int port, const char * host) {
     int sopt = 1;
     struct sockaddr_in serv_addr;
     int server_socket = socket(AF_INET, SOCK_STREAM, 0);
@@ -371,9 +359,10 @@ int create_server_sock(unsigned int port) {
     }
 
     bzero((char *) &serv_addr, sizeof(serv_addr));
+//target port -200, target ip is client ip
     serv_addr.sin_family = AF_INET;
     serv_addr.sin_port = htons(port);
-    serv_addr.sin_addr.s_addr = INADDR_ANY;
+    resolve(serv_addr.sin_addr, host);
     setsockopt(server_socket, SOL_SOCKET, SO_REUSEADDR, (char *)&sopt, sizeof(sopt));
 
     if (bind(server_socket, (struct sockaddr *) &serv_addr, sizeof(serv_addr)) < 0) {
@@ -411,16 +400,51 @@ SSL_CTX  * init_ssl(const char * cert) {
     return ssl_ctx;
 }
 
-int main(int argc, char * argv[]) {
-    if (3 != argc) {
-        fprintf(stderr, "usage: %s lport cert\n", argv[0]);
-        exit(1);
+int resolve(struct in_addr * sin_addr, const char * hostname) {
+    struct addrinfo * ai;
+    struct addrinfo hints = {0};
+
+    if (inet_aton(hostname, sin_addr)) {
+        return 0;
     }
 
-    signal(SIGPIPE, signal_handler);  // catch pipe
+    hints.ai_family = AF_INET;
+
+    if (getaddrinfo(hostname, NULL, &hints, &ai)) {
+        return -1;
+    }
+
+    for (struct addrinfo * info = ai; info; info = info->ai_next) {
+        if (info->ai_family == AF_INET) {
+            *sin_addr = ((struct sockaddr_in *)info->ai_addr)->sin_addr;
+            freeaddrinfo(ai);
+            return 0;
+        }
+    }
+
+    freeaddrinfo(ai);
+    return -1;
+}
+
+int main(int argc, char * argv[]) {
+    if (2 != argc) {
+        fprintf(stderr, "usage: %s cert\n", argv[0]);
+        return 1;
+    }
+    char hostname[512] = {0};
+    char port[512] = {0};
+    strcpy(hostname, getenv("RFB_CLIENT_IP"));
+    strcpy(port, getenv("RFB_SERVER_PORT"));
+    signal(SIGPIPE, SIG_IGN);
     signal(SIGCHLD, SIG_IGN);
-    SSL_CTX  * ssl_ctx = init_ssl(argv[2]);
-    int server_socket = create_server_sock(strtol(argv[1], NULL, 10));
+
+    if (strlen(hostname) == 0 || strlen(port) == 0) {
+        fprintf(stderr, "expected RFB_CLIENT_IP to contain client IP and RFB_SERVER_PORT to contain server port\n");
+        return 1;
+    }
+
+    SSL_CTX  * ssl_ctx = init_ssl(argv[1]);
+    int server_socket = create_server_sock(strtol(port, NULL, 10) -200 , hostname);
     struct sockaddr_in cli_addr = {0};
     socklen_t clilen = sizeof(cli_addr);
 
@@ -450,6 +474,7 @@ int main(int argc, char * argv[]) {
         if (pid == 0) {  // handler process. not doing a new alloc works because fork generates a new stack.
             do_handshake( ssl_ctx, client_socket);
             return 0;   // Child process exits
+
         } else {         // parent process
             close(client_socket);
         }
