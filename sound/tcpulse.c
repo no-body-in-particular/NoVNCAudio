@@ -348,48 +348,20 @@ bool do_handshake(SSL_CTX  * ssl_ctx, int sock) {
     return close_connection(sock, ssl);
 }
 
-int resolve(struct in_addr * sin_addr, const char * hostname) {
-    struct addrinfo * ai;
-    struct addrinfo hints = {0};
-
-    if (inet_aton(hostname, sin_addr)) {
-        return 0;
-    }
-
-    hints.ai_family = AF_INET;
-
-    if (getaddrinfo(hostname, NULL, &hints, &ai)) {
-        return -1;
-    }
-
-    for (struct addrinfo * info = ai; info; info = info->ai_next) {
-        if (info->ai_family == AF_INET) {
-            *sin_addr = ((struct sockaddr_in *)info->ai_addr)->sin_addr;
-            freeaddrinfo(ai);
-            return 0;
-        }
-    }
-
-    freeaddrinfo(ai);
-    return -1;
-}
-
 int create_server_sock(unsigned int port, const char * host) {
     int sopt = 1;
     struct sockaddr_in serv_addr;
     int server_socket = socket(AF_INET, SOCK_STREAM, 0);
 
-    fprintf(stdout,"Creating socket to listen for connections from %s on port %%d\n",host,port);
     if (server_socket < 0) {
         fprintf(stderr, "Failed to create listening socket.\n");
         return -1;
     }
 
     bzero((char *) &serv_addr, sizeof(serv_addr));
-    //target port -200, target ip is client ip
     serv_addr.sin_family = AF_INET;
     serv_addr.sin_port = htons(port);
-    resolve(&serv_addr.sin_addr, host);
+    resolve(serv_addr.sin_addr, host);
     setsockopt(server_socket, SOL_SOCKET, SO_REUSEADDR, (char *)&sopt, sizeof(sopt));
 
     if (bind(server_socket, (struct sockaddr *) &serv_addr, sizeof(serv_addr)) < 0) {
@@ -398,7 +370,7 @@ int create_server_sock(unsigned int port, const char * host) {
     }
 
     listen(server_socket, 100);
-    fprintf(stdout, "Waiting for connections on %%d\n", port);
+    fprintf(stdout, "Waiting for connections on %d from IP %s\n", port,host);
     return server_socket;
 }
 
@@ -427,26 +399,49 @@ SSL_CTX  * init_ssl(const char * cert) {
     return ssl_ctx;
 }
 
+int resolve(struct in_addr * sin_addr, const char * hostname) {
+    struct addrinfo * ai;
+    struct addrinfo hints = {0};
+
+    if (inet_aton(hostname, sin_addr)) {
+        return 0;
+    }
+
+    hints.ai_family = AF_INET;
+
+    if (getaddrinfo(hostname, NULL, &hints, &ai)) {
+        return -1;
+    }
+
+    for (struct addrinfo * info = ai; info; info = info->ai_next) {
+        if (info->ai_family == AF_INET) {
+            *sin_addr = ((struct sockaddr_in *)info->ai_addr)->sin_addr;
+            freeaddrinfo(ai);
+            return 0;
+        }
+    }
+
+    freeaddrinfo(ai);
+    return -1;
+}
 
 int main(int argc, char * argv[]) {
-    if (2 != argc) {
-        fprintf(stderr, "usage: %s cert\n", argv[0]);
+    if (3 != argc) {
+        fprintf(stderr, "usage: %s cert port\n", argv[0]);
         return 1;
     }
+
     char hostname[512] = {0};
-    char port[512] = {0};
     strcpy(hostname, getenv("RFB_CLIENT_IP"));
-    strcpy(port, getenv("RFB_SERVER_PORT"));
     signal(SIGPIPE, SIG_IGN);
     signal(SIGCHLD, SIG_IGN);
 
-    if (strlen(hostname) == 0 || strlen(port) == 0) {
-        fprintf(stderr, "expected RFB_CLIENT_IP to contain client IP and RFB_SERVER_PORT to contain server port\n");
-        return 1;
+    if(strlen(hostname)==0){
+      strcpy(hostname,"0.0.0.0");
     }
 
     SSL_CTX  * ssl_ctx = init_ssl(argv[1]);
-    int server_socket = create_server_sock(strtol(port, NULL, 10) -200 , "0.0.0.0");
+    int server_socket = create_server_sock(strtol(argv[2], NULL, 10) , hostname);
     struct sockaddr_in cli_addr = {0};
     socklen_t clilen = sizeof(cli_addr);
 

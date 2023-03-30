@@ -1,7 +1,7 @@
 #!/sbin/openrc-run
 # Copyright 1999-2014 Gentoo Foundation
 # Distributed under the terms of the GNU General Public License, v2 or later
-DISPLAYS="admin:2"
+DISPLAYS="1000:2"
 
 depend() {
 	need net
@@ -12,27 +12,30 @@ depend() {
 start() {
 	ebegin "Starting VNC server"
 
-	for user in "admin:2"; do
-		usrname=${user%%:*}
+	for user in "$DISPLAYS"; do
+		usrid=${user%%:*}
+                usrname=$( id -u -n $usrid )
 		usrdisp=${user##*:}
                 su -s "/bin/bash" $usrname -c "startx -- :$usrdisp" > /var/log/x11.$usrname.log 2>&1 &
-		su -s /bin/bash ${usrname} -c "source /etc/profile && export UNIXPW_DISABLE_SSL=1 && export UNIXPW_DISABLE_LOCALHOST=1 && cd ~$usrname && x11vnc -shared -many -nomodtweak -noxkb -afteraccept \"/bin/tcpulse /etc/cert.pem &\" -gone \"kilall -u 1000 tcpulse\" -rfbport 590${usrdisp} -unixpw_cmd /bin/verify_pw -loop -display \":$usrdisp\" " >/var/log/vncserver.${usrdisp}.log 2>&1 &
-                websockify --cert /etc/cert.pem 580${usrdisp} localhost:590${usrdisp} >/var/log/websockify.vncserver.$usrname.log 2>&1 &
+		su -s /bin/bash ${usrname} -c "source /etc/profile && export UNIXPW_DISABLE_SSL=1 && export UNIXPW_DISABLE_LOCALHOST=1 && cd ~$usrname && export FD_GEOM=1920x1080 && x11vnc -shared -many -nomodtweak -noxkb -afteraccept \"/bin/tcpulse /etc/cert.pem 570${usrdisp} &\" -gone \"kilall -u $usrid tcpulse\" -rfbport 580${usrdisp} -unixpw_cmd /bin/verify_pw -loop -display \":$usrdisp\" -ssl /etc/cert.pem " >/var/log/vncserver.${usrdisp}.log 2>&1 &
 	done
 	eend $?
 }
 
 stop() {
 	ebegin "Stopping VNC server"
-        killall websockify
-        killall tcpulse
         pkill -U 1000
 
-		for user in $DISPLAYS; do
-			killall x11vnc >/dev/null 2>&1
-		done
-			rm -rf /tmp/.X11-unix >/dev/null 2>&1
-		eend 0
+	for user in $DISPLAYS; do
+                usrid=${user%%:*}
+                usrdisp=${user##*:}
+                pkill -U $usrid
+                rm -rf /tmp/.X$usrdisp-lock 2>/dev/null
+ 	done
+
+        rm -rf /tmp/.X11-unix >/dev/null 2>&1
+
+ 	eend 0
 }
 
 restart() {
