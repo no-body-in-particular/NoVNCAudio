@@ -1758,10 +1758,11 @@ export default class RFB extends EventTargetMixin {
         // In preference order
         encs.push(encodings.encodingCopyRect);
         // Only supported with full depth support
+        
         if (this._fbDepth == 24) {
+            encs.push(encodings.encodingHextile);
             encs.push(encodings.encodingTight);
             encs.push(encodings.encodingTightPNG);
-            encs.push(encodings.encodingHextile);
             encs.push(encodings.encodingRRE);
         }
         encs.push(encodings.encodingRaw);

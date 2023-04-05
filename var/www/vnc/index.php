@@ -93,11 +93,11 @@
          <a href="#" class="myButton" id="fullscreen">fullscreen</a><input type="text" id="cboard" name="cboard" size="10" /><a href="#" class="myButton" id="paste">paste</a>
          <li>
             <label for="quality">Quality:</label>
-            <input id="quality" type="range" min="0" max="9" value="0">
+            <input id="quality" type="range" min="0" max="9" value="9">
          </li>
          <li>
             <label for="compression">Compression level:</label>
-            <input id="compression" type="range" min="0" max="9" value="9">
+            <input id="compression" type="range" min="0" max="9" value="4">
          </li>
       </ul>
       <div id="screen"></div>
