@@ -1,4 +1,11 @@
 NoVNC with audio - code mostly taken from NoVNC repositories - with a few custom binaries and init scripts.
 Init script relies on x11vnc and the source code in this repository to work - just make and make_install the login and sound binaries.
 
+HowTO:
+Copy files in /var/www to your webserver.
+Run "make && make install" in the login and sound folders.
+Copy init script to /etc/init.d/ and the Xorg config somewhere, edit init script with UserIDs as needed.
+Add file containing the vnc password in ~/.vnc/vnc_password and chmod to 600
+Enjoy your VNC server with audio.
+
 https://github.com/novnc/noVNC
