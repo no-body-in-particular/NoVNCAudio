@@ -1,10 +1,10 @@
 /*
- * This file is auto-generated from keymaps.csv on 2017-05-31 16:20
- * Database checksum sha256(92fd165507f2a3b8c5b3fa56e425d45788dbcb98cf067a307527d91ce22cab94)
+ * This file is auto-generated from keymaps.csv
+ * Database checksum sha256(76d68c10e97d37fe2ea459e210125ae41796253fb217e900bf2983ade13a7920)
  * To re-generate, run:
- *   keymap-gen --lang=js code-map keymaps.csv html atset1
+ *   keymap-gen code-map --lang=js keymaps.csv html atset1
 */
-export default {
+const XtScancode={
   "Again": 0xe005, /* html:Again (Again) -> linux:129 (KEY_AGAIN) -> atset1:57349 */
   "AltLeft": 0x38, /* html:AltLeft (AltLeft) -> linux:56 (KEY_LEFTALT) -> atset1:56 */
   "AltRight": 0xe038, /* html:AltRight (AltRight) -> linux:100 (KEY_RIGHTALT) -> atset1:57400 */
@@ -111,6 +111,8 @@ export default {
   "KeyX": 0x2d, /* html:KeyX (KeyX) -> linux:45 (KEY_X) -> atset1:45 */
   "KeyY": 0x15, /* html:KeyY (KeyY) -> linux:21 (KEY_Y) -> atset1:21 */
   "KeyZ": 0x2c, /* html:KeyZ (KeyZ) -> linux:44 (KEY_Z) -> atset1:44 */
+  "Lang1": 0x72, /* html:Lang1 (Lang1) -> linux:122 (KEY_HANGEUL) -> atset1:114 */
+  "Lang2": 0x71, /* html:Lang2 (Lang2) -> linux:123 (KEY_HANJA) -> atset1:113 */
   "Lang3": 0x78, /* html:Lang3 (Lang3) -> linux:90 (KEY_KATAKANA) -> atset1:120 */
   "Lang4": 0x77, /* html:Lang4 (Lang4) -> linux:91 (KEY_HIRAGANA) -> atset1:119 */
   "Lang5": 0x76, /* html:Lang5 (Lang5) -> linux:85 (KEY_ZENKAKUHANKAKU) -> atset1:118 */
@@ -169,3 +171,5 @@ export default {
   "Undo": 0xe007, /* html:Undo (Undo) -> linux:131 (KEY_UNDO) -> atset1:57351 */
   "WakeUp": 0xe063, /* html:WakeUp (WakeUp) -> linux:143 (KEY_WAKEUP) -> atset1:57443 */
 };
+
+export default XtScancode;

@@ -6,9 +6,9 @@
  * See README.md for usage and integration instructions.
  */
 
-import { deflateInit, deflate } from "./zlib/deflate.js";
-import { Z_FULL_FLUSH } from "./zlib/deflate.js";
-import ZStream from "./zlib/zstream.js";
+import { deflateInit, deflate } from "./vendor/pako/lib/zlib/deflate.js";
+import { Z_FULL_FLUSH } from "./vendor/pako/lib/zlib/deflate.js";
+import ZStream from "./vendor/pako/lib/zlib/zstream.js";
 
 export default class Deflator {
     constructor() {
