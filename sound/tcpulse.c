@@ -143,7 +143,7 @@ static void hash_key(unsigned char * key, char * target) {
     SHA1_Update(&c, key, strlen(key));
     SHA1_Update(&c, "258EAFA5-E914-47DA-95CA-C5AB0DC85B11", 36);
     SHA1_Final(hash, &c);
-    unsigned int * b64 = target;
+    unsigned int * b64 = (unsigned int *)target;
     hash[20] = 0;
     memset(b64, 0, 29);
     B64INT(b64[0], hash);
@@ -391,7 +391,7 @@ int create_server_sock(unsigned int port) {
     bzero((char *) &serv_addr, sizeof(serv_addr));
     serv_addr.sin_family = AF_INET;
     serv_addr.sin_port = htons(port);
-    resolve(&serv_addr.sin_addr, "0.0.0.0");
+    serv_addr.sin_addr.s_addr = htonl(INADDR_ANY);
     setsockopt(server_socket, SOL_SOCKET, SO_REUSEADDR, (char *)&sopt, sizeof(sopt));
 
     if ( ret = bind(server_socket, (struct sockaddr *) &serv_addr, sizeof(struct sockaddr)) < 0) {
@@ -473,24 +473,27 @@ int main(int argc, char * argv[]) {
         }
 
         strcpy(remote_host, inet_ntoa(cli_addr.sin_addr));
-        fprintf(stdout, "Client connected from IP %s\n", remote_host);
+        fprintf(stdout, "Client connected from host %s\n", remote_host);
 
         if (strcmp("0.0.0.0", hostname) != 0 && strcmp(remote_host, hostname) != 0) {
-            fprintf(stdout, "IP does not match bind IP, dropping connection.\n");
+            fprintf(stdout, "host ( %s ) does not match bind host, dropping connection.\n",remote_host);
             close(client_socket);
-        } else {
-            struct timeval tv = {CONN_TIMEOUT, 0};
-            setsockopt(client_socket, SOL_SOCKET, SO_SNDTIMEO, (const char *)&tv, sizeof tv);
-            setsockopt(client_socket, SOL_SOCKET, SO_RCVTIMEO, (const char *)&tv, sizeof tv);
-            pid = fork();
+            continue;
+        }
 
-            if (pid == 0) {  // handler process. not doing a new alloc works because fork generates a new stack.
-                do_handshake( ssl_ctx, client_socket);
-                return 0;   // Child process exits
+        struct timeval tv = {CONN_TIMEOUT, 0};
 
-            } else {         // parent process
-                close(client_socket);
-            }
+        setsockopt(client_socket, SOL_SOCKET, SO_SNDTIMEO, (const char *)&tv, sizeof tv);
+        setsockopt(client_socket, SOL_SOCKET, SO_RCVTIMEO, (const char *)&tv, sizeof tv);
+
+        pid = fork();
+
+        if (pid == 0) {  // handler process. not doing a new alloc works because fork generates a new stack.
+            do_handshake( ssl_ctx, client_socket);
+            return 0;   // Child process exits
+
+        } else {         // parent process
+            close(client_socket);
         }
     }
 }
