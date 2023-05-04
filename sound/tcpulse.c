@@ -183,7 +183,7 @@ int popen2(const char * cmdline,   int  * from_child, int * to_child) {
         close(pipe_stdout[0]);
         dup2(pipe_stdin[0], fileno(stdin));
         dup2(pipe_stdout[1], fileno(stdout));
-        execl("/bin/sh", "sh", "-c", cmdline, 0);
+        execl("/bin/sh", "sh", "-c", cmdline, (char *)0);
         perror("execl");
         exit(0);
     }
@@ -249,7 +249,7 @@ void pipe_audio(int sockfd, SSL * ssl) {
             int ret = ws_send(sockfd, ssl, cout_buf, len);
 
             if (ret < len ) {
-                fprintf(stderr, "source closed connection\n");
+                fprintf(stderr, "client closed connection\n");
                 break;
             }
         }
@@ -348,8 +348,38 @@ bool do_handshake(SSL_CTX  * ssl_ctx, int sock) {
     return close_connection(sock, ssl);
 }
 
-int create_server_sock(unsigned int port, const char * host) {
+
+
+int resolve(struct in_addr * sin_addr, const char * hostname) {
+    struct addrinfo * ai;
+    struct addrinfo hints = {0};
+
+    if (inet_aton(hostname, sin_addr)) {
+        return 0;
+    }
+
+    hints.ai_family = AF_INET;
+
+    if (getaddrinfo(hostname, NULL, &hints, &ai)) {
+        return -1;
+    }
+
+    for (struct addrinfo * info = ai; info; info = info->ai_next) {
+        if (info->ai_family == AF_INET) {
+            *sin_addr = ((struct sockaddr_in *)info->ai_addr)->sin_addr;
+            freeaddrinfo(ai);
+            return 0;
+        }
+    }
+
+    freeaddrinfo(ai);
+    return -1;
+}
+
+
+int create_server_sock(unsigned int port) {
     int sopt = 1;
+    int ret = 0;
     struct sockaddr_in serv_addr;
     int server_socket = socket(AF_INET, SOCK_STREAM, 0);
 
@@ -361,16 +391,16 @@ int create_server_sock(unsigned int port, const char * host) {
     bzero((char *) &serv_addr, sizeof(serv_addr));
     serv_addr.sin_family = AF_INET;
     serv_addr.sin_port = htons(port);
-    resolve(serv_addr.sin_addr, host);
+    resolve(&serv_addr.sin_addr, "0.0.0.0");
     setsockopt(server_socket, SOL_SOCKET, SO_REUSEADDR, (char *)&sopt, sizeof(sopt));
 
-    if (bind(server_socket, (struct sockaddr *) &serv_addr, sizeof(serv_addr)) < 0) {
-        fprintf(stderr, "Failed to bind to port %u.\n", port);
+    if ( ret = bind(server_socket, (struct sockaddr *) &serv_addr, sizeof(struct sockaddr)) < 0) {
+        fprintf(stderr, "Failed to bind to port %u. return value: %i \n", port, errno);
         return -1;
     }
 
     listen(server_socket, 100);
-    fprintf(stdout, "Waiting for connections on %d from IP %s\n", port,host);
+    fprintf(stdout, "Waiting for connections on %d\n", port);
     return server_socket;
 }
 
@@ -399,49 +429,28 @@ SSL_CTX  * init_ssl(const char * cert) {
     return ssl_ctx;
 }
 
-int resolve(struct in_addr * sin_addr, const char * hostname) {
-    struct addrinfo * ai;
-    struct addrinfo hints = {0};
-
-    if (inet_aton(hostname, sin_addr)) {
-        return 0;
-    }
-
-    hints.ai_family = AF_INET;
-
-    if (getaddrinfo(hostname, NULL, &hints, &ai)) {
-        return -1;
-    }
-
-    for (struct addrinfo * info = ai; info; info = info->ai_next) {
-        if (info->ai_family == AF_INET) {
-            *sin_addr = ((struct sockaddr_in *)info->ai_addr)->sin_addr;
-            freeaddrinfo(ai);
-            return 0;
-        }
-    }
-
-    freeaddrinfo(ai);
-    return -1;
-}
-
 int main(int argc, char * argv[]) {
-    if (3 != argc) {
-        fprintf(stderr, "usage: %s cert port\n", argv[0]);
+    if (3 > argc) {
+        fprintf(stderr, "usage: %s certificate_chain.pem port [ip]\n", argv[0]);
         return 1;
     }
 
     char hostname[512] = {0};
-    strcpy(hostname, getenv("RFB_CLIENT_IP"));
-    signal(SIGPIPE, SIG_IGN);
-    signal(SIGCHLD, SIG_IGN);
+    strcpy(hostname, "0.0.0.0");
 
-    if(strlen(hostname)==0){
-      strcpy(hostname,"0.0.0.0");
+    if (argc > 3) {
+        strcpy(hostname, argv[3]);
+
+    } else {
+        if ( 0 != getenv("RFB_CLIENT_IP") ) {
+            strcpy(hostname, getenv("RFB_CLIENT_IP"));
+        }
     }
 
+    signal(SIGPIPE, SIG_IGN);
+    signal(SIGCHLD, SIG_IGN);
     SSL_CTX  * ssl_ctx = init_ssl(argv[1]);
-    int server_socket = create_server_sock(strtol(argv[2], NULL, 10) , hostname);
+    int server_socket = create_server_sock(strtol(argv[2], NULL, 10));
     struct sockaddr_in cli_addr = {0};
     socklen_t clilen = sizeof(cli_addr);
 
@@ -456,24 +465,32 @@ int main(int argc, char * argv[]) {
     while (1) {
         int pid = 0;
         int client_socket = accept(server_socket, (struct sockaddr *) &cli_addr,  &clilen);
+        char remote_host[256] = {0};
 
         if (client_socket < 0) {
             fprintf(stderr, "Failed to accept connection.\n");
             continue;
         }
 
-        fprintf(stdout, "Client connected from IP %s\n", inet_ntoa(cli_addr.sin_addr));
-        struct timeval tv = {CONN_TIMEOUT, 0};
-        setsockopt(client_socket, SOL_SOCKET, SO_SNDTIMEO, (const char *)&tv, sizeof tv);
-        setsockopt(client_socket, SOL_SOCKET, SO_RCVTIMEO, (const char *)&tv, sizeof tv);
-        pid = fork();
+        strcpy(remote_host, inet_ntoa(cli_addr.sin_addr));
+        fprintf(stdout, "Client connected from IP %s\n", remote_host);
 
-        if (pid == 0) {  // handler process. not doing a new alloc works because fork generates a new stack.
-            do_handshake( ssl_ctx, client_socket);
-            return 0;   // Child process exits
-
-        } else {         // parent process
+        if (strcmp("0.0.0.0", hostname) != 0 && strcmp(remote_host, hostname) != 0) {
+            fprintf(stdout, "IP does not match bind IP, dropping connection.\n");
             close(client_socket);
+        } else {
+            struct timeval tv = {CONN_TIMEOUT, 0};
+            setsockopt(client_socket, SOL_SOCKET, SO_SNDTIMEO, (const char *)&tv, sizeof tv);
+            setsockopt(client_socket, SOL_SOCKET, SO_RCVTIMEO, (const char *)&tv, sizeof tv);
+            pid = fork();
+
+            if (pid == 0) {  // handler process. not doing a new alloc works because fork generates a new stack.
+                do_handshake( ssl_ctx, client_socket);
+                return 0;   // Child process exits
+
+            } else {         // parent process
+                close(client_socket);
+            }
         }
     }
 }
