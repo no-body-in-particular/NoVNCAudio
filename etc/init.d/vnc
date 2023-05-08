@@ -17,7 +17,7 @@ start() {
                 usrname=$( id -u -n $usrid )
 		usrdisp=${user##*:}
                 su -s "/bin/bash" $usrname -c "startx -- :$usrdisp" > /var/log/x11.$usrname.log 2>&1 &
-		su -s /bin/bash ${usrname} -c "source /etc/profile && export UNIXPW_DISABLE_SSL=1 && export UNIXPW_DISABLE_LOCALHOST=1 && cd ~$usrname && export FD_GEOM=1920x1080 && x11vnc -shared -many -nomodtweak -noxkb -afteraccept \"/bin/tcpulse /etc/cert.pem 570${usrdisp} &\" -gone \"killall -u $usrid tcpulse\" -rfbport 580${usrdisp} -unixpw_cmd /bin/verify_pw -loop -display \":$usrdisp\" -ssl /etc/cert.pem -repeat -clear_all -skip_lockkeys " >/var/log/vncserver.${usrdisp}.log 2>&1 &
+		su -s /bin/bash ${usrname} -c "source /etc/profile && export UNIXPW_DISABLE_SSL=1 && export UNIXPW_DISABLE_LOCALHOST=1 && cd ~$usrname && export FD_GEOM=1920x1080 && x11vnc -shared -many -nomodtweak -noxkb -afteraccept \"/bin/tcpulse /etc/cert.pem 570${usrdisp} &\"  -rfbport 580${usrdisp} -unixpw_cmd /bin/verify_pw -loop -display \":$usrdisp\" -ssl /etc/cert.pem -repeat -clear_all -skip_lockkeys " >/var/log/vncserver.${usrdisp}.log 2>&1 &
 	done
 	eend $?
 }
