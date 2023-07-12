@@ -429,6 +429,36 @@ SSL_CTX  * init_ssl(const char * cert) {
     return ssl_ctx;
 }
 
+bool host_allowed(const char * host) {
+    char * buffer = 0;
+    long length;
+    bool ret = false;
+    FILE * f = fopen ("/etc/allowedhosts", "rb");
+
+    if (f) {
+        fseek (f, 0, SEEK_END);
+        length = ftell (f);
+        fseek (f, 0, SEEK_SET);
+        buffer = malloc (length + 1);
+        buffer[length] = 0;
+
+        if (buffer) {
+            fread (buffer, 1, length, f);
+        }
+
+        fclose (f);
+    }
+
+    if (buffer) {
+        if (strstr(buffer, host)) {
+            ret = true;
+        }
+    }
+
+    free(buffer);
+    return ret
+}
+
 int main(int argc, char * argv[]) {
     if (3 > argc) {
         fprintf(stderr, "usage: %s certificate_chain.pem port [ip]\n", argv[0]);
@@ -475,8 +505,8 @@ int main(int argc, char * argv[]) {
         strcpy(remote_host, inet_ntoa(cli_addr.sin_addr));
         fprintf(stdout, "Client connected from host %s\n", remote_host);
 
-        if (strcmp("0.0.0.0", hostname) != 0 && strcmp(remote_host, hostname) != 0) {
-            fprintf(stdout, "host ( %s ) does not match bind host, dropping connection.\n",remote_host);
+        if ( host_allowed(remote_host) != 0) {
+            fprintf(stdout, "host ( %s ) does not match bind host, dropping connection.\n", remote_host);
             close(client_socket);
             continue;
         }
@@ -484,6 +514,7 @@ int main(int argc, char * argv[]) {
         struct timeval tv = {CONN_TIMEOUT, 0};
 
         setsockopt(client_socket, SOL_SOCKET, SO_SNDTIMEO, (const char *)&tv, sizeof tv);
+
         setsockopt(client_socket, SOL_SOCKET, SO_RCVTIMEO, (const char *)&tv, sizeof tv);
 
         pid = fork();

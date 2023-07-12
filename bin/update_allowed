@@ -1,0 +1,4 @@
+#!/bin/bash
+echo $RFB_CLIENT_IP >> /etc/allowedhosts
+cat /etc/allowedhosts | sort | uniq > /tmp/allowedhosts
+cat /tmp/allowedhosts > /etc/allowedhosts
