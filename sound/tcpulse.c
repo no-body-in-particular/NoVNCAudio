@@ -456,7 +456,7 @@ bool host_allowed(const char * host) {
     }
 
     free(buffer);
-    return ret
+    return ret;
 }
 
 int main(int argc, char * argv[]) {
