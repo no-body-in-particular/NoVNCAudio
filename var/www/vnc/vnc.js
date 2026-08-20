@@ -54,11 +54,139 @@ export default class VNC {
         viewer.addEventListener('keydown', e => myself.startAudio());
     }
 
+    static get XK_Shift_L()   { return 0xffe1; }
+    static get XK_Control_L() { return 0xffe3; }
+    static get XK_Super_L()   { return 0xffeb; }
+    static get XK_Insert()    { return 0xff63; }
+
+    // Type a string into the session one key at a time.
+    //
+    // The old version sent each character's keysym with no modifier - right for a server that
+    // reads keysyms, but a server that maps keysym onto a hardware scancode needs Shift actually
+    // held to produce a shifted glyph, so '!', '@', '?', capitals and the rest came out as '1',
+    // '2', '/', lower case. Shifted characters are wrapped in a real Shift press now.
     paste(str) {
-         for (let i = 0, len = str.length; i < len; i++) {
-           this.rfb.sendKey(str.charCodeAt(i));
-         }
-   }
+        for (const ch of str) {                     // by code point, surrogate pairs stay whole
+            const cp = ch.codePointAt(0);
+            const keysym = cp < 0x100 ? cp : 0x01000000 + cp;   // X11: Latin-1 direct, rest via the plane
+            const shifted = VNC.needsShift(ch);
+
+            if (shifted) { this.rfb.sendKey(VNC.XK_Shift_L, "ShiftLeft", true); }
+            this.rfb.sendKey(keysym);               // down + up
+            if (shifted) { this.rfb.sendKey(VNC.XK_Shift_L, "ShiftLeft", false); }
+        }
+    }
+
+    // Capitals and the shifted symbols of a US layout.
+    static needsShift(ch) {
+        if (ch.length === 1 && ch >= 'A' && ch <= 'Z') { return true; }
+        return '~!@#$%^&*()_+{}|:\"<>?'.indexOf(ch) !== -1;
+    }
+
+    // Share the clipboard with the host both ways, without the textbox. The server sends whatever
+    // is copied inside the session as a clipboard event, which is written to the browser clipboard
+    // so it can be pasted on this machine. A Ctrl+V while the session is focused hands the browser
+    // clipboard to the server, to be pasted inside the guest - the paste gesture grants the read,
+    // so no permission prompt.
+    hookClipboard() {
+        // Host -> this machine: whatever is copied inside the session arrives as a clipboard
+        // event and is written to the browser clipboard, so it can be pasted locally.
+        this.rfb.addEventListener("clipboard", e => {
+            const text = e.detail && e.detail.text;
+            if (!text) { return; }
+            this._remoteClipboard = text;
+            if (navigator.clipboard && navigator.clipboard.writeText) {
+                navigator.clipboard.writeText(text).catch(() => {});
+            }
+        });
+
+        if (this._clipboardHooked) { return; }       // guard: a reconnect builds a fresh rfb
+        this._clipboardHooked = true;
+
+        // This machine -> host, on Ctrl+V (or Cmd+V). It is caught in the capture phase and
+        // stopped there, so noVNC does not also forward the physical Ctrl+V to the guest - which
+        // it would send *before* the clipboard update reached the server, pasting the previous
+        // contents. Instead the clipboard is set first, then the guest's own paste shortcut is
+        // pressed, so the order is right and the paste happens exactly once.
+        //
+        // Reading the clipboard needs the async API, which prompts once. Where it is not available
+        // the key is left alone and the fallback paste listener below sets the clipboard instead,
+        // leaving the actual paste keystroke to the user.
+        const canRead = navigator.clipboard && navigator.clipboard.readText;
+
+        window.addEventListener('keydown', e => {
+            if (!this.rfb || !canRead) { return; }
+
+            const key = e.key ? e.key.toLowerCase() : '';
+            const paste = (e.ctrlKey || e.metaKey) && !e.altKey && key === 'v';
+
+            if (!paste) { return; }
+
+            const t = e.target;
+            if (t && /^(INPUT|TEXTAREA)$/.test(t.tagName)) { return; }   // leave the textbox alone
+
+            e.preventDefault();
+            e.stopImmediatePropagation();               // keep it away from noVNC's own handler
+
+            navigator.clipboard.readText().then(text => this.pasteToGuest(text)).catch(() => {});
+        }, true);
+
+        // The matching key ups, so noVNC does not forward a lone 'v' up for a press it never saw.
+        window.addEventListener('keyup', e => {
+            if (!this.rfb || !canRead) { return; }
+            const key = e.key ? e.key.toLowerCase() : '';
+            if ((e.ctrlKey || e.metaKey) && key === 'v') {
+                const t = e.target;
+                if (t && /^(INPUT|TEXTAREA)$/.test(t.tagName)) { return; }
+                e.preventDefault();
+                e.stopImmediatePropagation();
+            }
+        }, true);
+
+        // Fallback for a browser without clipboard.readText: set the host clipboard from the paste
+        // event and let the user press the guest's paste key themselves.
+        document.addEventListener('paste', e => {
+            if (!this.rfb || canRead) { return; }
+            const t = e.target;
+            if (t && /^(INPUT|TEXTAREA)$/.test(t.tagName)) { return; }
+            const data = e.clipboardData || window.clipboardData;
+            const text = data ? data.getData('text') : '';
+            if (text) { this.rfb.clipboardPasteFrom(text); }
+        });
+    }
+
+    // Which keystroke pastes on the host. Ctrl+V by default; a guest that pastes with Shift+Insert
+    // (many terminals) or with a Super/Cmd based shortcut can be selected with ?pastekey=...
+    guestPasteCombo() {
+        switch ((this.readQueryVariable('pastekey', 'ctrl-v') || 'ctrl-v').toLowerCase()) {
+            case 'shift-insert':
+                return { mods: [[VNC.XK_Shift_L, 'ShiftLeft']], key: [VNC.XK_Insert, 'Insert'] };
+            case 'super-v':
+            case 'cmd-v':
+                return { mods: [[VNC.XK_Super_L, 'MetaLeft']], key: [0x76, 'KeyV'] };
+            case 'ctrl-shift-v':
+                return { mods: [[VNC.XK_Control_L, 'ControlLeft'], [VNC.XK_Shift_L, 'ShiftLeft']], key: [0x76, 'KeyV'] };
+            default:
+                return { mods: [[VNC.XK_Control_L, 'ControlLeft']], key: [0x76, 'KeyV'] };
+        }
+    }
+
+    // Press a modifier+key chord on the guest: modifiers down, key down and up, modifiers up.
+    sendCombo(combo) {
+        for (const [ks, code] of combo.mods) { this.rfb.sendKey(ks, code, true); }
+        this.rfb.sendKey(combo.key[0], combo.key[1], true);
+        this.rfb.sendKey(combo.key[0], combo.key[1], false);
+        for (const [ks, code] of combo.mods.slice().reverse()) { this.rfb.sendKey(ks, code, false); }
+    }
+
+    // Put the text on the host clipboard, then press the host's paste shortcut. The clipboard
+    // message is queued on the socket before the key events, so a short delay is only insurance
+    // against the extended-clipboard handshake, which is a round trip rather than a single message.
+    pasteToGuest(text) {
+        if (!text) { return; }
+        this.rfb.clipboardPasteFrom(text);
+        setTimeout(() => this.sendCombo(this.guestPasteCombo()), 60);
+    }
 
   // This function is called when we are disconnected
     disconnectedFromServer() {
@@ -113,9 +241,25 @@ export default class VNC {
         this.rfb.addEventListener("disconnect", () => this.disconnectedFromServer());
         this.rfb.addEventListener("credentialsrequired", () => this.credentialsAreRequired());
 
+        // share the clipboard with the host both ways, no textbox needed
+        this.hookClipboard();
+
         // Set parameters that can be changed on an active connection
         this.rfb.viewOnly = this.readQueryVariable('view_only', false);
         this.rfb.scaleViewport = this.readQueryVariable('scale', true);
+
+        // Apply the image settings at connect. They were only ever set from the slider's onchange,
+        // so at load neither was applied and noVNC quietly used its own defaults - the 9 and 4 the
+        // sliders showed were never in effect. Both are read from the URL now, defaulting now to the
+        // light end - quality 3, compression 6 - which keeps the stream responsive over a slow
+        // link at the cost of some sharpness. A fast connection can turn it up: ?quality=9&compression=2.
+        this.rfb.qualityLevel = parseInt(this.readQueryVariable('quality', 3), 10);
+        this.rfb.compressionLevel = parseInt(this.readQueryVariable('compression', 6), 10);
+
+        // Only redraw what actually changed, and let the browser composite the scaling, so a
+        // resize or a partial update does not repaint the whole canvas.
+        this.rfb.clipViewport = this.readQueryVariable('clip', false);
     }
 
 }
+
