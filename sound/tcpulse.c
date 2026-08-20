@@ -505,8 +505,12 @@ int main(int argc, char * argv[]) {
         strcpy(remote_host, inet_ntoa(cli_addr.sin_addr));
         fprintf(stdout, "Client connected from host %s\n", remote_host);
 
-        if ( host_allowed(remote_host) != 0) {
-            fprintf(stdout, "host ( %s ) does not match bind host, dropping connection.\n", remote_host);
+        // host_allowed() is true when the host IS listed, so the drop has to be on
+        // the negation. This was inverted: every client x11vnc had added to
+        // /etc/allowedhosts was dropped, and every host that was NOT on the list got
+        // the audio stream.
+        if (!host_allowed(remote_host)) {
+            fprintf(stdout, "host ( %s ) is not in /etc/allowedhosts, dropping connection.\n", remote_host);
             close(client_socket);
             continue;
         }
