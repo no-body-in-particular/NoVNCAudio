@@ -426,6 +426,36 @@ SSL_CTX  * init_ssl(const char * cert) {
         return 0;
     }
 
+    // Optional mutual TLS. When TCPULSE_CLIENT_CA names a CA bundle, a client has
+    // to present a certificate signed by it or the handshake fails - which is a
+    // real credential rather than the /etc/allowedhosts address list, whose
+    // entries never expire and are shared by everyone behind the same NAT.
+    //
+    // Deliberately fail-closed: if the variable is set but the CA cannot be
+    // loaded, refuse to start rather than fall back to accepting everyone. A
+    // typo in the path must not silently turn the authentication off.
+    const char * client_ca = getenv("TCPULSE_CLIENT_CA");
+
+    if (client_ca && *client_ca) {
+        if (1 != SSL_CTX_load_verify_locations(ssl_ctx, client_ca, NULL)) {
+            fprintf(stderr, "Unable to load client CA file %s - refusing to start\n", client_ca);
+            SSL_CTX_free(ssl_ctx);
+            return 0;
+        }
+
+        // Send the CA's name in the handshake, so a browser holding several
+        // certificates can pick the right one instead of prompting for all.
+        STACK_OF(X509_NAME) * ca_names = SSL_load_client_CA_file(client_ca);
+
+        if (ca_names) {
+            SSL_CTX_set_client_CA_list(ssl_ctx, ca_names);
+        }
+
+        SSL_CTX_set_verify(ssl_ctx, SSL_VERIFY_PEER | SSL_VERIFY_FAIL_IF_NO_PEER_CERT, NULL);
+        SSL_CTX_set_verify_depth(ssl_ctx, 4);
+        fprintf(stdout, "Client certificate verification enabled against %s\n", client_ca);
+    }
+
     return ssl_ctx;
 }
 
