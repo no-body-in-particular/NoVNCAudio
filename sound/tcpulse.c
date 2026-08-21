@@ -436,7 +436,16 @@ SSL_CTX  * init_ssl(const char * cert) {
     // typo in the path must not silently turn the authentication off.
     const char * client_ca = getenv("TCPULSE_CLIENT_CA");
 
-    if (client_ca && *client_ca) {
+    if (!client_ca || !*client_ca) {
+        fprintf(stderr, "TCPULSE_CLIENT_CA is not set - refusing to start.\n"
+                "Client certificates are the only access control since the\n"
+                "/etc/allowedhosts list was removed; starting without them would\n"
+                "serve the desktop audio to anyone who connects.\n");
+        SSL_CTX_free(ssl_ctx);
+        return 0;
+    }
+
+    {
         if (1 != SSL_CTX_load_verify_locations(ssl_ctx, client_ca, NULL)) {
             fprintf(stderr, "Unable to load client CA file %s - refusing to start\n", client_ca);
             SSL_CTX_free(ssl_ctx);
@@ -459,35 +468,6 @@ SSL_CTX  * init_ssl(const char * cert) {
     return ssl_ctx;
 }
 
-bool host_allowed(const char * host) {
-    char * buffer = 0;
-    long length;
-    bool ret = false;
-    FILE * f = fopen ("/etc/allowedhosts", "rb");
-
-    if (f) {
-        fseek (f, 0, SEEK_END);
-        length = ftell (f);
-        fseek (f, 0, SEEK_SET);
-        buffer = malloc (length + 1);
-        buffer[length] = 0;
-
-        if (buffer) {
-            fread (buffer, 1, length, f);
-        }
-
-        fclose (f);
-    }
-
-    if (buffer) {
-        if (strstr(buffer, host)) {
-            ret = true;
-        }
-    }
-
-    free(buffer);
-    return ret;
-}
 
 int main(int argc, char * argv[]) {
     if (3 > argc) {
@@ -534,16 +514,6 @@ int main(int argc, char * argv[]) {
 
         strcpy(remote_host, inet_ntoa(cli_addr.sin_addr));
         fprintf(stdout, "Client connected from host %s\n", remote_host);
-
-        // host_allowed() is true when the host IS listed, so the drop has to be on
-        // the negation. This was inverted: every client x11vnc had added to
-        // /etc/allowedhosts was dropped, and every host that was NOT on the list got
-        // the audio stream.
-        if (!host_allowed(remote_host)) {
-            fprintf(stdout, "host ( %s ) is not in /etc/allowedhosts, dropping connection.\n", remote_host);
-            close(client_socket);
-            continue;
-        }
 
         struct timeval tv = {CONN_TIMEOUT, 0};
 
