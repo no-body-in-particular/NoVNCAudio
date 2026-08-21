@@ -97,6 +97,17 @@ served even if the files end up reachable from the public site by another route.
    wrapper refuses to run CGI from a directory owned by anyone else.
 6. Check with `hiawatha -k` before restarting.
 
+### Linking them from your own index page
+
+These pages are not part of any index, so add the links wherever your site lists
+things. The restart link has to point at the certificate port explicitly, since
+the page refuses to act on any other:
+
+```php
+echo "<a href='music/'>[Music]</a>";
+echo "<a href='https://", explode(':', $_SERVER['HTTP_HOST'])[0], ":8443/vnc-restart.php'>[Restart VNC]</a>";
+```
+
 ### Things that will bite you
 
 - **The vhost is never matched.** A `VirtualHost` cannot claim the same
@@ -138,6 +149,13 @@ Reads tags with `ffprobe`, cached under `~/.cache/share-music`. Cover art comes
 from `cover.jpg`/`folder.jpg`/`front.jpg` in the folder, falling back to artwork
 embedded in the first track. Play with nothing playing queues every track in the
 current folder and below it, or in a folder selected in the list.
+
+On Android, audio keeps playing when the tab is backgrounded because the page
+presents a media session: metadata, artwork, position, and handlers for play,
+pause, stop, next, previous and seeking. Metadata alone is not enough - without
+play/pause handlers the notification has no controls and the session is treated
+as inert. A web app manifest is served from `?manifest=1`, so adding it to the
+home screen gives it its own task rather than a tab the system may discard.
 
 It can also download audio from YouTube into the folder being viewed, using
 `var/www/share/music/youtube.py` (which wraps `yt-dlp`). The job runs detached

@@ -215,6 +215,27 @@ if (isset($_GET['tracks'])) {
     exit;
 }
 
+
+// ---- web app manifest ------------------------------------------------------
+// Android keeps a page's audio alive in the background when it presents a media
+// session; installing it to the home screen makes that more reliable still and
+// gives it its own task rather than a browser tab that can be discarded.
+if (isset($_GET['manifest'])) {
+    header('Content-Type: application/manifest+json');
+    echo json_encode([
+        'name'             => 'Music',
+        'short_name'       => 'Music',
+        'start_url'        => './',
+        'scope'            => './',
+        'display'          => 'standalone',
+        'background_color' => '#232629',
+        'theme_color'      => '#31363b',
+        'orientation'      => 'any',
+        'icons'            => [],
+    ]);
+    exit;
+}
+
 // ---- listing --------------------------------------------------------------
 $dirRel = isset($_GET['d']) ? (string)$_GET['d'] : '';
 $dir    = resolve($dirRel);
@@ -254,6 +275,9 @@ $parent = ($dir === ROOT) ? null : rel_of(dirname($dir));
 $total  = array_sum(array_column($tracks, 'dur'));
 ?><!doctype html>
 <html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="theme-color" content="#31363b">
+<meta name="mobile-web-app-capable" content="yes">
+<link rel="manifest" href="?manifest=1">
 <title><?= $h($dirRel === '' ? 'Music' : basename($dirRel)) ?> — Music</title>
 <style>
 :root{--win:#31363b;--view:#232629;--side:#2b3034;--head:#31363b;--fg:#eff0f1;--dim:#9aa2a8;
@@ -310,10 +334,11 @@ td.num{width:34px;color:var(--dim);text-align:right;font-variant-numeric:tabular
 td.ar{color:var(--dim);width:34%}
 td.d{width:60px;text-align:right;color:var(--dim);font-variant-numeric:tabular-nums}
 .folderrow a{color:var(--fg);text-decoration:none}
-.player{flex:none;display:flex;align-items:center;gap:14px;padding:9px 14px;background:var(--head);
+.player{flex:none;display:flex;flex-direction:column;gap:5px;padding:7px 12px 9px;background:var(--head);
         border-top:1px solid var(--line)}
+.prow{display:flex;align-items:center;gap:12px;min-width:0}
 .player .art{width:46px;height:46px;font-size:15px}
-.np{width:210px;overflow:hidden}
+.np{flex:1;min-width:0;overflow:hidden}
 .np .t{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .np .a{color:var(--dim);font-size:12px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .ctrls{display:flex;align-items:center;gap:6px}
@@ -324,15 +349,25 @@ td.d{width:60px;text-align:right;color:var(--dim);font-variant-numeric:tabular-n
 .ctrls button.main{background:var(--sel);color:#fff;width:36px;height:36px}
 .ctrls button.main:hover{background:#1abc9c}
 .ctrls button.on{color:var(--sel)}
-.bar{flex:1;display:flex;align-items:center;gap:9px}
+.bar{display:flex;align-items:center;gap:9px;width:100%}
 input[type=range]{width:100%;accent-color:var(--sel)}
 .time{color:var(--dim);font-size:12px;font-variant-numeric:tabular-nums;width:42px;text-align:center}
-.vol{width:96px;display:flex;align-items:center;gap:6px}
-@media(max-width:760px){.side{display:none}.np{width:130px}.vol{display:none}}
+.vol{width:96px;flex:none;display:flex;align-items:center;gap:6px}
+@media(max-width:760px){
+  .side{display:none}
+  .vol{display:none}
+  .player .art{width:38px;height:38px;font-size:13px}
+  .prow{gap:8px}
+  .ctrls{gap:2px}
+  .ctrls button{width:30px;height:30px}
+  .ctrls button.main{width:34px;height:34px}
+  .toolbar{flex-wrap:wrap;gap:6px}
+  #ytUrl{width:100%;min-width:0}
+  #ytForm{flex:1 1 100%}
+}
 </style></head><body>
 
 <div class="toolbar">
-  <b>Music</b>
   <a href="?d=">All folders</a>
   <?php if ($parent !== null): ?><a href="?d=<?= urlencode($parent) ?>">↑ Up</a><?php endif; ?>
   <span class="grow"></span>
@@ -340,7 +375,6 @@ input[type=range]{width:100%;accent-color:var(--sel)}
     <input id="ytUrl" type="url" placeholder="Paste a YouTube URL to download here" spellcheck="false">
     <button class="ytbtn" type="submit" id="ytGo">Download</button>
   </form>
-  <a href="/">Files</a>
 </div>
 
 <div class="main">
@@ -385,6 +419,12 @@ input[type=range]{width:100%;accent-color:var(--sel)}
 </div>
 
 <div class="player">
+  <div class="bar">
+    <span class="time" id="cur">0:00</span>
+    <input type="range" id="seek" value="0" min="0" max="1000" step="1">
+    <span class="time" id="dur">0:00</span>
+  </div>
+  <div class="prow">
   <div class="art"><?php if ($dirRel !== ''): ?><img id="art" alt="" src="?cover=<?= urlencode($dirRel) ?>" onerror="this.remove()"><?php endif; ?></div>
   <div class="np"><div class="t" id="npT">Nothing playing</div><div class="a" id="npA"></div></div>
   <div class="ctrls">
@@ -397,12 +437,8 @@ input[type=range]{width:100%;accent-color:var(--sel)}
     <button id="shf" onclick="toggleShuffle()" title="Shuffle">🔀</button>
     <button id="rpt" onclick="toggleRepeat()" title="Repeat">🔁</button>
   </div>
-  <div class="bar">
-    <span class="time" id="cur">0:00</span>
-    <input type="range" id="seek" value="0" min="0" max="1000" step="1">
-    <span class="time" id="dur">0:00</span>
-  </div>
   <div class="vol">🔊<input type="range" id="vol" min="0" max="100" value="100"></div>
+  </div>
 </div>
 
 <div id="ytPanel">
@@ -434,8 +470,7 @@ function play(i){
   document.querySelectorAll('tr.playing').forEach(t=>t.classList.remove('playing'));
   document.getElementById('tr'+i)?.classList.add('playing');
   if (!order.length) buildOrder();
-  if ('mediaSession' in navigator) navigator.mediaSession.metadata =
-    new MediaMetadata({title:TRACKS[i].title, artist:TRACKS[i].artist});
+  updateSession(i);
 }
 let picked = null;   // a folder row clicked in the list, if any
 
@@ -478,10 +513,15 @@ function toggleRepeat(){ repeat=!repeat; document.getElementById('rpt').classLis
 const ICON_PLAY  = 'M4.5 2.6l9 5.4-9 5.4z';
 const ICON_PAUSE = 'M4.5 2.5h3v11h-3zM8.5 2.5h3v11h-3z';
 const setIcon = d => document.querySelector('#ppIcon path').setAttribute('d', d);
-au.onplay  = () => setIcon(ICON_PAUSE);
-au.onpause = () => setIcon(ICON_PLAY);
+au.onplay  = () => { setIcon(ICON_PAUSE); if (hasMS) navigator.mediaSession.playbackState = 'playing'; updatePosition(); };
+au.onpause = () => { setIcon(ICON_PLAY);  if (hasMS) navigator.mediaSession.playbackState = 'paused'; };
+au.onloadedmetadata = updatePosition;
 au.onended = () => { if (repeat) { au.currentTime = 0; au.play(); } else next(); };
+let posTick = 0;
 au.ontimeupdate = () => {
+  // The notification scrubber only needs an occasional update; doing it on every
+  // timeupdate is wasteful and some platforms throttle it anyway.
+  if (++posTick % 8 === 0) updatePosition();
   curEl.textContent = fmt(au.currentTime);
   if (au.duration) { durEl.textContent = fmt(au.duration); seek.value = String(au.currentTime/au.duration*1000); }
 };
@@ -493,9 +533,57 @@ addEventListener('keydown', e => {
   else if (e.key === 'ArrowRight' && e.shiftKey) next();
   else if (e.key === 'ArrowLeft'  && e.shiftKey) prev();
 });
-if ('mediaSession' in navigator) {
-  navigator.mediaSession.setActionHandler('nexttrack', next);
-  navigator.mediaSession.setActionHandler('previoustrack', prev);
+/* ---------- media session: what keeps playback alive in the background ----
+   Android will only continue audio from a backgrounded tab when the page owns
+   a media session it can surface as a notification. Metadata alone is not
+   enough - without play/pause handlers the notification has no controls and the
+   session is treated as inert, so handlers are registered for everything the
+   platform may offer. */
+const hasMS = 'mediaSession' in navigator;
+
+function folderOf(file){ const i = file.lastIndexOf('/'); return i < 0 ? '' : file.slice(0, i); }
+
+function updateSession(i){
+  if (!hasMS || !TRACKS[i]) return;
+  const dir = folderOf(TRACKS[i].file);
+  const art = new URL('?cover=' + encodeURIComponent(dir), location.href).href;
+  navigator.mediaSession.metadata = new MediaMetadata({
+    title:  TRACKS[i].title,
+    artist: TRACKS[i].artist || '',
+    album:  dir.split('/').pop() || 'Music',
+    // If the folder has no cover this 404s and the platform just shows nothing,
+    // which is better than omitting artwork entirely on devices that do have it.
+    artwork: [{src: art, sizes: '400x400', type: 'image/jpeg'}],
+  });
+}
+
+function updatePosition(){
+  if (!hasMS || !navigator.mediaSession.setPositionState) return;
+  if (!isFinite(au.duration) || au.duration <= 0) return;
+  try {
+    navigator.mediaSession.setPositionState({
+      duration: au.duration,
+      playbackRate: au.playbackRate || 1,
+      position: Math.min(au.currentTime, au.duration),
+    });
+  } catch (e) { /* some versions reject odd values mid-seek */ }
+}
+
+if (hasMS) {
+  const handlers = {
+    play:          () => au.play(),
+    pause:         () => au.pause(),
+    stop:          () => { au.pause(); au.currentTime = 0; },
+    nexttrack:     next,
+    previoustrack: prev,
+    seekbackward:  d => { au.currentTime = Math.max(0, au.currentTime - (d && d.seekOffset ? d.seekOffset : 10)); },
+    seekforward:   d => { au.currentTime = Math.min(au.duration || 0, au.currentTime + (d && d.seekOffset ? d.seekOffset : 10)); },
+    seekto:        d => { if (d && d.seekTime != null) { au.currentTime = d.seekTime; updatePosition(); } },
+  };
+  for (const [action, fn] of Object.entries(handlers)) {
+    // Not every platform supports every action; an unsupported one throws.
+    try { navigator.mediaSession.setActionHandler(action, fn); } catch (e) {}
+  }
 }
 
 /* ---------- download from YouTube into the folder being viewed ---------- */

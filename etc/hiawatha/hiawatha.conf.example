@@ -64,7 +64,13 @@ VirtualHost {
 }
 
 # ---------------------------------------------------------------------------
-# 5. Optional: deny python sources on the public site, so the helper script
-#    cannot be fetched if it sits under the public root.
-#    Add py|pyc|pyo to your existing DenyAccess extension list.
+# 5. On the public site, deny anything that should never be served: the helper
+#    script if it sits under the public root, and key material. Add these to
+#    your existing DenyAccess extension list:
+#
+#      py|pyc|pyo|p12|pfx|jks|keystore|p8|der
+#
+#    Note that a rule anchored with $ only matches an exact extension, so a
+#    backup named index.php.bak-20240101 slips past a \.bak$ rule. Keep backups
+#    outside the website root rather than relying on the pattern.
 # ---------------------------------------------------------------------------
