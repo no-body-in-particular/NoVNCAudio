@@ -214,6 +214,37 @@ void set_nonblock(int fd) {
 }
 
 
+// Read and discard whatever the client sends us.
+//
+// The only thing a browser sends on this socket is a pong for every ping below,
+// but nothing ever read them, so they accumulated in the kernel receive buffer
+// until it hit its limit (131072 by default here). At that point the receive
+// window closes, the client can no longer send, and the connection wedges - the
+// audio simply stopped after a few minutes with everything still apparently
+// connected.
+//
+// The socket is switched to non-blocking for the duration so a partial TLS
+// record cannot stall the audio, and switched back before returning because the
+// send path below relies on blocking writes.
+void drain_client(int sockfd, SSL * ssl) {
+    char scratch[4096];
+    int fl = fcntl(sockfd, F_GETFL, 0);
+
+    if (fl < 0) {
+        return;
+    }
+
+    if (fcntl(sockfd, F_SETFL, fl | O_NONBLOCK) < 0) {
+        return;
+    }
+
+    while (ws_recv(sockfd, ssl, scratch, sizeof scratch) > 0) {
+        ;    // discarded on purpose
+    }
+
+    fcntl(sockfd, F_SETFL, fl);
+}
+
 void pipe_audio(int sockfd, SSL * ssl) {
     int   from_child = 0;
     int to_child = 0;
@@ -254,7 +285,10 @@ void pipe_audio(int sockfd, SSL * ssl) {
             }
         }
 
-        if (  iter % ( (CONN_TIMEOUT * 1000 ) / GRACE_TIME ) == 0) {
+        // GRACE_TIME is the usleep() argument and so is microseconds, not
+        // milliseconds: with 1000 here this pinged every ~5ms instead of every
+        // CONN_TIMEOUT seconds, flooding the client with pings to pong back.
+        if (  iter % ( (CONN_TIMEOUT * 1000000 ) / GRACE_TIME ) == 0) {
             uint8_t ping[] = {0x89, 0x05, 0x48, 0x65, 0x6c, 0x6c, 0x6f};
 
             if (ws_send(sockfd, ssl, ping, 7) < 7) {
@@ -262,6 +296,7 @@ void pipe_audio(int sockfd, SSL * ssl) {
             }
         }
 
+        drain_client(sockfd, ssl);
         usleep(GRACE_TIME);
     }
 
