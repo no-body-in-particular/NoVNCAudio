@@ -8,8 +8,7 @@ int main() {
     char buffer[512] = {0};
     char file_buffer[512] = {0};
     char pwd_file_name[512] = {0};
-    strcpy(pwd_file_name, getenv("HOME"));
-    strcat(pwd_file_name, "/.vnc/vnc_password");
+    snprintf(pwd_file_name, sizeof(pwd_file_name), "%s/.vnc/vnc_password", getenv("HOME"));
     fgets(buffer, 511, stdin); //read and discard username
     fgets(buffer, 511, stdin); //read password
     FILE * file = fopen ( pwd_file_name, "r" );
