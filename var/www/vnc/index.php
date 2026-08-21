@@ -91,6 +91,43 @@
             transform: translateY(1px);
             box-shadow: 0 1px 2px hsla(222, 40%, 4%, 0.4);
          }
+         /* Files overlay: the share, framed over the session. It is a separate
+            origin (its own port, because the client certificate is required
+            per-binding), so the page cannot see events happening inside the
+            frame - hence the explicit close button, since Escape only reaches
+            this page when focus is not inside the frame. */
+         #filesOverlay {
+            position: fixed;
+            inset: 3vh 3vw;
+            z-index: 9999;
+            display: none;
+            flex-direction: column;
+            background: #232629;
+            border: 1px solid #4d5257;
+            border-radius: 10px;
+            box-shadow: 0 24px 70px rgba(0,0,0,.6);
+            overflow: hidden;
+         }
+         #filesOverlay.open { display: flex }
+         #filesBar {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            padding: 7px 12px;
+            background: #31363b;
+            border-bottom: 1px solid #4d5257;
+            color: #eff0f1;
+            font: 600 13px/1 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+            flex: none;
+         }
+         #filesBar .grow { flex: 1 }
+         #filesBar .hint { font-weight: 400; color: #9aa2a8; font-size: 12px }
+         #filesClose {
+            background: none; border: 0; color: #eff0f1; font-size: 16px;
+            width: 26px; height: 26px; border-radius: 5px; cursor: pointer;
+         }
+         #filesClose:hover { background: #da4453; color: #fff }
+         #filesFrame { flex: 1; width: 100%; border: 0; background: #232629 }
          .myButton:focus-visible {
             outline: 2px solid #9db1ff;
             outline-offset: 2px;
@@ -110,6 +147,38 @@
          document.getElementById('quality').onchange = x =>  vnc.setQuality(x.srcElement.value);
          document.getElementById('compression').onchange = x =>  vnc.setCompression(x.srcElement.value);
          document.getElementById('fullscreen').onclick = x => {vnc.toggleFullscreen();}
+         // Prime the audio origin's certificate before any audio connection is made.
+         document.getElementById('certPrime').src = 'https://' + window.location.hostname + ':5702/';
+
+         const filesUrl = 'https://' + window.location.hostname + ':8443/';
+         const overlay  = document.getElementById('filesOverlay');
+         const frame    = document.getElementById('filesFrame');
+
+         function showFiles(e) {
+             if (e) { e.preventDefault(); }
+             if (frame.src !== filesUrl) { frame.src = filesUrl; }   // load once, keep state
+             overlay.classList.add('open');
+             overlay.setAttribute('aria-hidden', 'false');
+         }
+         function hideFiles() {
+             overlay.classList.remove('open');
+             overlay.setAttribute('aria-hidden', 'true');
+             document.getElementById('screen').focus();
+         }
+
+         document.getElementById('files').onclick = showFiles;
+         document.getElementById('filesClose').onclick = hideFiles;
+
+         // Capture phase, so Escape closes the overlay instead of being
+         // forwarded into the remote session by noVNC's own key handling.
+         window.addEventListener('keydown', e => {
+             if (e.key === 'Escape' && overlay.classList.contains('open')) {
+                 e.preventDefault();
+                 e.stopImmediatePropagation();
+                 hideFiles();
+             }
+         }, true);
+
          document.getElementById('screen').focus();;
          
       </script>
@@ -123,6 +192,14 @@
             </a>
          </li>
          <li>
+            <!-- The file browser needs the client certificate, which is only required on
+                 its own binding, so it lives on port 8443 rather than under this page. -->
+            <a href="#" class="myButton" id="files" title="Browse and transfer files in the home folder">
+               <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg>
+               <span>Files</span>
+            </a>
+         </li>
+         <li>
             <label for="quality">Quality</label>
             <input id="quality" type="range" min="0" max="9" value="3">
          </li>
@@ -131,6 +208,28 @@
             <input id="compression" type="range" min="0" max="9" value="6">
          </li>
       </ul>
+      <div id="filesOverlay" aria-hidden="true">
+         <div id="filesBar">
+            <span>Files</span>
+            <span class="grow"></span>
+            <span class="hint">Esc to close</span>
+            <button id="filesClose" title="Close">&#10005;</button>
+         </div>
+         <iframe id="filesFrame" title="File share" referrerpolicy="no-referrer"></iframe>
+      </div>
+      <!-- Primes the client certificate for the audio origin.
+           The audio socket is wss://host:5702, a different origin from this page
+           (the certificate is required per binding, so it needs its own port).
+           A browser will pick a certificate for a navigation but not for a
+           WebSocket a script opens on an origin it has no decision for yet, so
+           the audio connection was refused while the VNC one worked. Loading
+           that origin in a frame is a navigation: the TLS handshake happens, the
+           certificate choice is made and cached for the origin, and the audio
+           WebSocket then reuses it. tcpulse is not a web server, so the request
+           itself fails after the handshake - which is fine, the handshake was
+           the point, and it spawns no encoder. -->
+      <iframe id="certPrime" aria-hidden="true" tabindex="-1" title=""
+              style="position:absolute;width:0;height:0;border:0;visibility:hidden"></iframe>
       <div id="screen"></div>
    </body>
 </html>

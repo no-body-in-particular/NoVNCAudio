@@ -16,7 +16,7 @@ runx(){
             usrname=$( id -u -n $usrid )
             usrdisp=${user##*:}
             su -s /bin/bash ${usrname} -c "/bin/shm_clear -y"
-            su -s /bin/bash ${usrname} -c "source /etc/profile && export UNIXPW_DISABLE_SSL=1 && export UNIXPW_DISABLE_LOCALHOST=1 && cd ~$usrname && export FD_GEOM=1920x1080 && x11vnc -threads -forever -nevershared -nomodtweak -noxkb  -rfbport 580${usrdisp} -unixpw_cmd /bin/verify_pw -loop -display \":$usrdisp\" -ssl /etc/cert.pem -sslverify /etc/vnc-ca/ca.crt -repeat -clear_all -skip_lockkeys -auth /home/$usrname/.Xauthority " >/var/log/vncserver.${usrdisp}.log 2>&1 &
+            su -s /bin/bash ${usrname} -c "source /etc/profile && export UNIXPW_DISABLE_SSL=1 && export UNIXPW_DISABLE_LOCALHOST=1 && cd ~$usrname && export FD_GEOM=1920x1080 && x11vnc -threads -forever -nevershared -nomodtweak -noxkb  -rfbport 580${usrdisp} -nopw -loop -display \":$usrdisp\" -ssl /etc/cert.pem -sslverify /etc/vnc-ca/ca.crt -repeat -clear_all -skip_lockkeys -auth /home/$usrname/.Xauthority " >/var/log/vncserver.${usrdisp}.log 2>&1 &
         done
         sleep 72000
     done

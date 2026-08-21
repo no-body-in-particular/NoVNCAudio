@@ -1,0 +1,19 @@
+# Run the protected apps as the desktop user, so they can read and write $HOME.
+#
+# The CGI-wrapper binary needs the setuid bit and is only executable by Hiawatha.
+#
+# Format: Wrap = <wrap_id>;<path>;<userid>[:<groupid>[,<groupid>...]]
+#
+# The wrap_id ("share") is what WrapCGI in the vhost refers to. The path must
+# contain the scripts; subdirectories are allowed, so /music works too.
+#
+# Note the second group. The wrapper calls setgroups(), which replaces the
+# user's supplementary groups with exactly what is listed here. If any directory
+# on the path to the scripts is only traversable by the webserver's group - as
+# /var/www/hiawatha often is, being drwxrwxr-- - then that group has to be named
+# here too, or every request fails with 403.
+#
+# The directory holding the scripts must also be owned by the wrapped user.
+
+CGIhandler = /usr/bin/php-cgi
+Wrap = share;/var/www/hiawatha/share;admin:mail,hiawatha

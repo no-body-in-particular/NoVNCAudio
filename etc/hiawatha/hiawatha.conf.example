@@ -1,0 +1,70 @@
+# Hiawatha configuration for the file share, music player and VNC restart page.
+#
+# Add these to your existing hiawatha.conf. They are additive: the public site
+# keeps working exactly as before.
+
+# ---------------------------------------------------------------------------
+# 1. Give your existing public bindings an id, so the vhost below can be tied
+#    to a different one. Add "BindingId = pub" inside your port 80 and 443
+#    Binding blocks.
+# ---------------------------------------------------------------------------
+
+# ---------------------------------------------------------------------------
+# 2. A binding that demands a client certificate.
+#
+#    RequiredCA is a per-binding setting - there is no way to demand a
+#    certificate for one directory only. Putting it on 443 would demand one for
+#    the whole public site, so the protected apps need their own port.
+# ---------------------------------------------------------------------------
+Binding {
+    Port = 8443
+    BindingId = mtls
+    TLScertFile = /etc/cert.pem          # server cert + key + chain, as elsewhere
+    RequiredCA = /etc/vnc-ca/ca.crt      # the CA that signs your client certs
+    MaxRequestSize = 65536               # kB; one upload chunk plus headroom
+    MaxKeepAlive = 30
+    TimeForRequest = 10,900              # uploads and downloads can be slow
+}
+
+# ---------------------------------------------------------------------------
+# 3. A toolkit for the protected vhost.
+#
+#    Do NOT reuse a toolkit that denies by file extension. Hiawatha matches the
+#    query string as well as the path, so a rule like \.(bin|db|log)$ blocks
+#    "?f=archive.bin" - i.e. it silently breaks downloading those file types
+#    through the file manager. Deny dotfiles, and the helper script by path.
+# ---------------------------------------------------------------------------
+UrlToolkit {
+    ToolkitID = sharesafe
+    Match /\. DenyAccess
+    Match ^/music/youtube\.py DenyAccess
+}
+
+# ---------------------------------------------------------------------------
+# 4. The vhost.
+#
+#    Hostname must not be the same as the "hostname" of the default website, or
+#    the default site wins and this vhost is never matched. If your default site
+#    is named example.com, rename it (e.g. www.example.com); it still serves
+#    every request no vhost matches, so nothing else changes.
+#
+#    WrapCGI runs the CGI as another user - see cgi-wrapper.conf.example. Without
+#    it the apps run as the webserver user, which can read the home directory
+#    but cannot write to it.
+# ---------------------------------------------------------------------------
+VirtualHost {
+    Hostname = example.com               # same name your users type
+    WebsiteRoot = /var/www/hiawatha/share
+    StartFile = index.php
+    RequiredBinding = mtls               # this vhost only exists on 8443
+    WrapCGI = share
+    ExecuteCGI = yes
+    AccessList = allow all               # the certificate is the access control
+    UseToolkit = sharesafe
+}
+
+# ---------------------------------------------------------------------------
+# 5. Optional: deny python sources on the public site, so the helper script
+#    cannot be fetched if it sits under the public root.
+#    Add py|pyc|pyo to your existing DenyAccess extension list.
+# ---------------------------------------------------------------------------
