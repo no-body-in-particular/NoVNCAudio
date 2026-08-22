@@ -297,7 +297,14 @@ export default class RFB extends EventTargetMixin {
             this._showDotCursor = options.showDotCursor;
         }
 
-        this._qualityLevel = 6;
+        // 6 -> 3. Only photographic regions are affected: libvncserver encodes
+        // text and flat UI with palette/zlib, where the quality level does
+        // nothing (measured flat across q0..q9 on text). On a gradient frame it
+        // is the whole story - one full frame measured 119 KB at q6 against
+        // 58 KB at q3, about half the bytes for some JPEG artifacting on photos
+        // and video. Raise it back to 6 if image fidelity matters more than
+        // bandwidth on your link.
+        this._qualityLevel = 3;
         this._compressionLevel = 2;
     }
 
