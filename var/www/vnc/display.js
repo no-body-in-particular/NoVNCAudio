@@ -7,7 +7,6 @@
  */
 
 import * as Log from './util/logging.js';
-import Base64 from "./base64.js";
 import { toSigned32bit } from './util/int.js';
 
 export default class Display {
@@ -366,17 +365,39 @@ export default class Display {
             return;
         }
 
-        const img = new Image();
-        img.src = "data: " + mime + ";base64," + Base64.encode(arr);
-
-        this._renderQPush({
+        // Decode with createImageBitmap rather than a base64 data: URL.
+        //
+        // The old path base64-encoded every JPEG subrect in JS and handed the
+        // result to an <img>, then blocked the render queue on its 'load'
+        // event - so every later blit/fill/copy queued behind each image.
+        // createImageBitmap takes the bytes as-is (no base64 round trip) and
+        // decodes off the main thread. The queue still drains in order; it
+        // just is not doing the decode itself.
+        //
+        // The Blob constructor copies synchronously, so it is safe for the
+        // decoder to reuse `arr`'s buffer as soon as this returns.
+        const action = {
             'type': 'img',
-            'img': img,
+            'img': null,
             'x': x,
             'y': y,
             'width': width,
             'height': height
-        });
+        };
+
+        createImageBitmap(new Blob([arr], { type: mime }))
+            .then((bitmap) => {
+                action.img = bitmap;
+                this._scanRenderQ();
+            })
+            .catch((e) => {
+                Log.Error("Failed to decode " + mime + " rect: " + e);
+                // Mark it done rather than leaving the queue stalled forever.
+                action.img = 'error';
+                this._scanRenderQ();
+            });
+
+        this._renderQPush(action);
     }
 
     blitImage(x, y, width, height, arr, offset, fromQueue) {
@@ -469,13 +490,6 @@ export default class Display {
         }
     }
 
-    _resumeRenderQ() {
-        // "this" is the object that is ready, not the
-        // display object
-        this.removeEventListener('load', this._noVNCDisplay._resumeRenderQ);
-        this._noVNCDisplay._scanRenderQ();
-    }
-
     _scanRenderQ() {
         let ready = true;
         while (ready && this._renderQ.length > 0) {
@@ -494,7 +508,15 @@ export default class Display {
                     this.blitImage(a.x, a.y, a.width, a.height, a.data, 0, true);
                     break;
                 case 'img':
-                    if (a.img.complete) {
+                    if (a.img === null) {
+                        // Still decoding. The createImageBitmap() continuation
+                        // calls _scanRenderQ() again once it lands, so we just
+                        // stop here and keep the queue in order.
+                        ready = false;
+                    } else if (a.img === 'error') {
+                        // Decode failed and was already logged. Drop the rect
+                        // rather than wedging the queue behind it.
+                    } else {
                         if (a.img.width !== a.width || a.img.height !== a.height) {
                             Log.Error("Decoded image has incorrect dimensions. Got " +
                                       a.img.width + "x" + a.img.height + ". Expected " +
@@ -502,12 +524,7 @@ export default class Display {
                             return;
                         }
                         this.drawImage(a.img, a.x, a.y);
-                    } else {
-                        a.img._noVNCDisplay = this;
-                        a.img.addEventListener('load', this._resumeRenderQ);
-                        // We need to wait for this image to 'load'
-                        // to keep things in-order
-                        ready = false;
+                        a.img.close();
                     }
                     break;
             }
