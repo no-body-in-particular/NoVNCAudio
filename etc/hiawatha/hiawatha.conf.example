@@ -37,7 +37,11 @@ Binding {
 UrlToolkit {
     ToolkitID = sharesafe
     Match /\. DenyAccess
-    Match ^/music/youtube\.py DenyAccess
+    # Deny every .py under the share, not just youtube.py by name: these are
+    # executed by index.php or run from a shell, never fetched, and a new
+    # one (organize.py) would otherwise have been served as source. The
+    # 'secure' toolkit on the public bindings denies the same extension.
+    Match \.py$ DenyAccess
 }
 
 # ---------------------------------------------------------------------------
