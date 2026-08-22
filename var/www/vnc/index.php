@@ -142,8 +142,35 @@
          import VNC from './vnc.js';
          
          let vnc = new VNC();
-         vnc.start();
-         
+
+         // Prime the VNC origin's certificate BEFORE opening the socket.
+         //
+         // The session socket is wss://host:5802, a different origin from this
+         // page (the certificate is required per binding, so it needs its own
+         // port). A browser picks a certificate for a navigation but not for a
+         // WebSocket a script opens on an origin it has no decision for yet.
+         // On a browser that had already visited :5802 the decision was cached
+         // and this worked; on a fresh machine it is not, so the handshake was
+         // abandoned and the server logged:
+         //   SSL_accept() *FATAL: -1 SSL FAILED
+         //   error:0A000126:SSL routines::unexpected eof while reading
+         // which looks like a connection problem but is a missing certificate.
+         // Loading the origin in a frame first is a navigation, so the choice
+         // is made and cached, and the WebSocket then reuses it.
+         (function primeThenStart() {
+            const frame = document.getElementById('certPrimeVnc');
+            let started = false;
+            const go = () => { if (!started) { started = true; vnc.start(); } };
+            // x11vnc is not a web server, so the request itself fails after the
+            // handshake - fine, the handshake was the point. Either outcome
+            // means the certificate decision has been made.
+            frame.addEventListener('load', go);
+            frame.addEventListener('error', go);
+            // Never let a hung or slow prime keep the session from starting.
+            setTimeout(go, 8000);
+            frame.src = 'https://' + window.location.hostname + ':5802/';
+         })();
+
          document.getElementById('quality').onchange = x =>  vnc.setQuality(x.srcElement.value);
          document.getElementById('compression').onchange = x =>  vnc.setCompression(x.srcElement.value);
          document.getElementById('fullscreen').onclick = x => {vnc.toggleFullscreen();}
@@ -229,6 +256,12 @@
            itself fails after the handshake - which is fine, the handshake was
            the point, and it spawns no encoder. -->
       <iframe id="certPrime" aria-hidden="true" tabindex="-1" title=""
+              style="position:absolute;width:0;height:0;border:0;visibility:hidden"></iframe>
+      <!-- Same trick for the session origin (wss://host:5802). Without this a
+           browser that has never navigated to :5802 has no certificate decision
+           for it, so the session WebSocket is refused and the session cannot be
+           taken over from a new machine. -->
+      <iframe id="certPrimeVnc" aria-hidden="true" tabindex="-1" title=""
               style="position:absolute;width:0;height:0;border:0;visibility:hidden"></iframe>
       <div id="screen"></div>
    </body>
