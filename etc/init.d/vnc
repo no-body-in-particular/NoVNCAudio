@@ -1,79 +1,167 @@
 #!/sbin/openrc-run
 # Copyright 1999-2014 Gentoo Foundation
 # Distributed under the terms of the GNU General Public License, v2 or later
+#
+# Starts tcpulse and supervises the X session and its x11vnc.
+#
+# Why the supervisor exists: .xinitrc ends in a `while pgrep dwm; sleep 1; done`
+# loop, so the X server's lifetime is tied to the window manager. If dwm dies -
+# or anything kills the startx/xinit process tree - X shuts down cleanly and
+# takes every application and shell in the session with it. supervise() notices
+# within $INTERVAL and brings X, then x11vnc, back.
+#
+# It used to live in /usr/local/bin/vnc-session-guard. It is inline here so
+# there is exactly one launcher: previously the init script and a separately
+# started guard both managed x11vnc, several copies of each ended up running,
+# and every loser that could not bind the port died with BadShmSeg and was
+# restarted by x11vnc's own -loop about 24 times a minute - forever, burning
+# ~1.8% of a core and writing ~144 MB/day to /var/log/vncserver.2.log.
+#
+# The flock in supervise() is what makes that impossible to repeat: however
+# many times this script is started, only one supervisor can hold the lock.
+
 DISPLAYS="1000:2"
+INTERVAL="${INTERVAL:-5}"
+GUARDLOG="/var/log/vnc-session-guard.log"
+LOCKFILE="/run/vnc-supervise.lock"
+PIDFILE="/run/vnc-supervise.pid"
+
+extra_commands="supervise"
 
 depend() {
 	need net
 }
 
+glog() {
+	echo "$(date '+%F %T') $*" >>"$GUARDLOG"
+}
 
-runx(){
-   while true; do
-        pgrep x11vnc | xargs kill -9 >/dev/null 2>&1
-        for user in "$DISPLAYS"; do
-            usrid=${user%%:*}
-            usrname=$( id -u -n $usrid )
-            usrdisp=${user##*:}
-            su -s /bin/bash ${usrname} -c "/bin/shm_clear -y"
-            su -s /bin/bash ${usrname} -c "source /etc/profile && export UNIXPW_DISABLE_SSL=1 && export UNIXPW_DISABLE_LOCALHOST=1 && cd ~$usrname && export FD_GEOM=1920x1080 && x11vnc -threads -forever -alwaysshared -nomodtweak -noxkb  -rfbport 580${usrdisp} -nopw -loop -display \":$usrdisp\" -ssl /etc/cert.pem -sslverify /etc/vnc-ca/ca.crt -repeat -clear_all -skip_lockkeys -auth /home/$usrname/.Xauthority " >/var/log/vncserver.${usrdisp}.log 2>&1 &
-        done
-        sleep 72000
-    done
+# Run $1 as user $2.
+as_user() {
+	su -s /bin/bash "$2" -c "$1"
+}
+
+x_alive() {
+	# $1 = display number
+	[ -S "/tmp/.X11-unix/X$1" ] || return 1
+	ps -eo comm=,args= | awk -v d=":$1" '
+		($1=="X"||$1=="Xorg") && index($0,d) {found=1}
+		END {exit !found}'
+}
+
+vnc_alive() {
+	# $1 = display number
+	ps -eo comm=,args= | awk -v d="-display :$1" '
+		$1=="x11vnc" && index($0,d) {found=1}
+		END {exit !found}'
+}
+
+start_x() {
+	# $1 = display number, $2 = user
+	glog "X on :$1 is down - starting"
+	rm -f "/tmp/.X$1-lock" 2>/dev/null
+	as_user "cd ~ && exec startx -- :$1" >>"/var/log/x11.$2.log" 2>&1 &
+	for _ in $(seq 1 30); do
+		sleep 1
+		x_alive "$1" && { glog "X on :$1 is up"; return 0; }
+	done
+	glog "X on :$1 failed to come up within 30s"
+	return 1
+}
+
+start_vnc() {
+	# $1 = display number, $2 = user
+	glog "x11vnc for :$1 is down - starting on port 580$1"
+	as_user "source /etc/profile; /bin/shm_clear -y >/dev/null 2>&1; \
+		export UNIXPW_DISABLE_SSL=1 UNIXPW_DISABLE_LOCALHOST=1 FD_GEOM=1920x1080; \
+		cd ~ && exec x11vnc -threads -forever -alwaysshared -nomodtweak -noxkb \
+		  -rfbport 580$1 -nopw -loop -display :$1 \
+		  -ssl /etc/cert.pem -sslverify /etc/vnc-ca/ca.crt \
+		  -repeat -clear_all -skip_lockkeys -auth /home/$2/.Xauthority" \
+		>>"/var/log/vncserver.$1.log" 2>&1 &
+	sleep 5
+	vnc_alive "$1" && glog "x11vnc for :$1 is up"
+}
+
+start_tcpulse() {
+	# $1 = display number, $2 = user
+	as_user "TCPULSE_CLIENT_CA=/etc/vnc-ca/ca.crt /bin/tcpulse /etc/cert.pem 570$1" \
+		>"/var/log/tcpulse.$2.log" 2>&1 &
+}
+
+# The supervision loop. Holds an exclusive lock for its whole lifetime, so a
+# second copy - however it was started - logs and exits instead of racing this
+# one for the rfb port.
+supervise() {
+	exec 9>"$LOCKFILE"
+	if ! flock -n 9; then
+		glog "supervisor already running - exiting"
+		return 0
+	fi
+	glog "supervisor started (displays '$DISPLAYS', interval ${INTERVAL}s)"
+	while true; do
+		for user in $DISPLAYS; do
+			usrid=${user%%:*}
+			usrname=$(id -u -n "$usrid")
+			usrdisp=${user##*:}
+			if ! x_alive "$usrdisp"; then
+				start_x "$usrdisp" "$usrname" && start_vnc "$usrdisp" "$usrname"
+			elif ! vnc_alive "$usrdisp"; then
+				start_vnc "$usrdisp" "$usrname"
+			fi
+		done
+		sleep "$INTERVAL"
+	done
 }
 
 start() {
 	ebegin "Starting VNC server"
 
-	for user in "$DISPLAYS"; do
+	for user in $DISPLAYS; do
 		usrid=${user%%:*}
-                usrname=$( id -u -n $usrid )
+		usrname=$(id -u -n "$usrid")
 		usrdisp=${user##*:}
-                # X and x11vnc are started and kept alive by vnc-session-guard
-                # (see below). Starting startx here too would race with it.
-                su -s "/bin/bash" $usrname -c "TCPULSE_CLIENT_CA=/etc/vnc-ca/ca.crt /bin/tcpulse /etc/cert.pem 570${usrdisp}" > /var/log/tcpulse.$usrname.log 2>&1 &
+		# X and x11vnc are started by the supervisor below, not here - starting
+		# startx here as well would race with it.
+		start_tcpulse "$usrdisp" "$usrname"
 	done
 
-        # Supervise X + x11vnc: .xinitrc ties the X server lifetime to dwm, so a
-        # dead window manager - or anything that kills the startx tree - takes the
-        # whole session down. The guard notices within 5s and brings it back.
-        for user in "$DISPLAYS"; do
-                usrid=${user%%:*}
-                usrname=$( id -u -n $usrid )
-                usrdisp=${user##*:}
-                DISP="$usrdisp" XUSER="$usrname" \
-                    start-stop-daemon --start --background \
-                    --make-pidfile --pidfile /run/vnc-session-guard.$usrdisp.pid \
-                    --exec /usr/local/bin/vnc-session-guard
-        done
-	eend $?
+	if [ -f "$PIDFILE" ] && kill -0 "$(cat "$PIDFILE" 2>/dev/null)" 2>/dev/null; then
+		einfo "supervisor already running (pid $(cat "$PIDFILE"))"
+	else
+		( supervise ) >/dev/null 2>&1 &
+		echo $! >"$PIDFILE"
+		einfo "supervisor started (pid $(cat "$PIDFILE"))"
+	fi
+
+	eend 0
 }
 
 stop() {
 	ebegin "Stopping VNC server"
-#        pkill -U 1000
-        pgrep x11vnc | xargs kill -9 >/dev/null 2>&1
+
+	if [ -f "$PIDFILE" ]; then
+		kill "$(cat "$PIDFILE" 2>/dev/null)" 2>/dev/null
+		rm -f "$PIDFILE" 2>/dev/null
+	fi
 
 	for user in $DISPLAYS; do
-                usrid=${user%%:*}
-                usrdisp=${user##*:}
-                # Do not pkill -U $usrid: that kills every process the user owns,
-                # including unrelated login shells. Stop only this display's stack.
-                start-stop-daemon --stop --quiet --oknodo \
-                    --pidfile /run/vnc-session-guard.$usrdisp.pid 2>/dev/null
-                rm -f /run/vnc-session-guard.$usrdisp.pid 2>/dev/null
-                pkill -U $usrid -f "x11vnc .*-display :$usrdisp"
-                pkill -U $usrid -f "^xinit .*:$usrdisp"
-                pkill -U $usrid -f "^/usr/bin/X .*:$usrdisp"
-                rm -rf /tmp/.X$usrdisp-lock 2>/dev/null
- 	done
+		usrid=${user%%:*}
+		usrdisp=${user##*:}
+		# Do not pkill -U $usrid: that kills every process the user owns,
+		# including unrelated login shells. Stop only this display's stack.
+		pkill -U "$usrid" -f "x11vnc .*-display :$usrdisp"
+		pkill -U "$usrid" -f "^xinit .*:$usrdisp"
+		pkill -U "$usrid" -f "^/usr/bin/X .*:$usrdisp"
+		rm -rf "/tmp/.X$usrdisp-lock" 2>/dev/null
+	done
 
-        rm -rf /tmp/.X11-unix >/dev/null 2>&1
+	rm -rf /tmp/.X11-unix >/dev/null 2>&1
 
- 	eend 0
+	eend 0
 }
 
 restart() {
-        svc_stop
-        svc_start
+	svc_stop
+	svc_start
 }

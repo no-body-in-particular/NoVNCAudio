@@ -13,7 +13,7 @@ gst-launch-1.0 -q -v alsasrc ! audio/x-raw, channels=2, rate=24000 !  voaacenc  
 Copy files in /var/www to your webserver.
 Run "make && make install" in the login and sound folders.
 Copy init script to /etc/init.d/ and the Xorg config somewhere, edit init script with UserIDs as needed.
-Copy `usr/local/bin/vnc-session-guard` to /usr/local/bin/ and `chmod 755` it - the init script starts it.
+The session supervisor is part of the init script; there is no separate binary to install.
 Add file containing the vnc password in `~/.vnc/vnc_password` and chmod to 600
 Enjoy your VNC server with audio.
 
@@ -26,18 +26,62 @@ ties the X server's lifetime to it. If the window manager dies - or anything kil
 the startx/xinit process tree - X shuts down cleanly and takes every application
 and shell in the session with it. Nothing brought it back.
 
-`vnc-session-guard` polls every 5s and restarts X, then x11vnc, when `:$DISP`
-disappears. The init script launches it via `start-stop-daemon` with a pidfile.
-It logs to `/var/log/vnc-session-guard.log`.
+`supervise()` in `/etc/init.d/vnc` polls every 5s and restarts X, then x11vnc,
+when `:$DISP` disappears. It logs to `/var/log/vnc-session-guard.log`.
 
-It installs to /usr/local/bin deliberately. Automated tooling that cleans up after
-itself by matching process cmdlines on substrings will match a launcher living in a
-scratch directory and kill the X tree with it; keeping the supervisor on a stable
-path outside those directories avoids that.
+It used to be a separate `/usr/local/bin/vnc-session-guard`, launched by the init
+script via `start-stop-daemon`. It is inline now so that there is exactly **one**
+launcher. With two, both managed x11vnc, several copies of each ended up running,
+and every loser that could not bind the rfb port died with `BadShmSeg` and was
+restarted by x11vnc's own `-loop` roughly **24 times a minute** - indefinitely,
+costing ~1.8% of a core and writing ~144 MB/day to `/var/log/vncserver.2.log`.
 
-Note that `stop()` kills only this display's X, x11vnc and guard. It previously ran
-`pkill -U $usrid`, which killed every process the user owned - including unrelated
-login shells - on any `restart`.
+`supervise()` holds an exclusive `flock` on `/run/vnc-supervise.lock` for its whole
+lifetime, so however many times the service is started - or a supervisor is launched
+by hand - only one can run. The rest log "supervisor already running" and exit.
+
+Note that `stop()` kills only this display's X, x11vnc and supervisor. It previously
+ran `pkill -U $usrid`, which killed every process the user owned - including
+unrelated login shells - on any `restart`.
+
+## x11vnc patches (Gentoo overlay)
+
+`var/db/repos/local/x11-misc/x11vnc/` is a `::local` overlay package -
+`x11vnc-0.9.17-r1` - carrying a local performance fix on top of the `::gentoo`
+ebuild. Point portage at the overlay (`/etc/portage/repos.conf/local.conf`,
+`location = /var/db/repos/local`) and `emerge -1 x11-misc/x11vnc`.
+
+**`x11vnc-0.9.17-copy_tiles-hint-width.patch`** - `copy_tiles()` narrows a changed
+tile's update rectangle to the columns that actually differ ("optimization for tall
+skinny lines, e.g. wm frame"), but the scan ran *after* the `memcpy()` that copies
+the new tile into `main_fb`, comparing the two buffers over exactly the range
+`memcpy()` had just made identical. `memcmp()` never reported a difference,
+`first_x`/`last_x` stayed `-1` for every tile, and `hint_updates()` fell back to the
+full tile width every time - the optimization had never done anything.
+
+The patch moves the scan ahead of the `memcpy()` and replaces the per-pixel
+`memcmp()` loop (one PLT call per pixel - `memcmp()` with a run-time length is never
+inlined) with a byte scan that only examines pixels which can still widen
+`[first_x, last_x]`. SSE2 where the compiler advertises it, portable 64-bit word
+scan otherwise; neither reads outside `[0,n)`.
+
+Verified against the original over 400k randomized cases (pixelsize 1/2/4, widths
+1..32), with and without SSE2. End to end against a scrolling 2px-wide line,
+incremental traffic drops from 552,961 to 34,561 pixels - about 16x - while the
+client's reconstructed framebuffer stays byte-identical to a fresh full-screen
+capture. It only helps where changes are *narrow*; on full-width scrolling text it
+is a wash. Not yet submitted upstream.
+
+### Other findings, not patched
+
+- **`-wait 5 -defer 5`** on x11vnc cuts median draw-to-client latency from ~26-33ms
+  to ~6ms (p90 ~56ms to ~9ms) for 9% -> 12% of a core. Defaults are 20/20.
+- **zlib-ng** as a drop-in `libz.so.1` makes Tight frames ~11.5% smaller for the
+  same screen (11,138 -> 9,858 bytes); ZRLE is unaffected. Format compatibility
+  verified both directions with `Z_SYNC_FLUSH` streaming.
+- **Not worth it:** `-O3 -march=native -flto` (null result vs `-O2`); Tight
+  quality/compression levels (flat - libvncserver does not use JPEG for text);
+  libjpeg is already libjpeg-turbo with SIMD.
 
 
 It works something like this:

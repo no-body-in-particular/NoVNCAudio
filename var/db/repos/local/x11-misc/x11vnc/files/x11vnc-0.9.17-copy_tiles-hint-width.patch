@@ -1,0 +1,181 @@
+copy_tiles(): compute the tile hint width before overwriting the framebuffer
+
+The nt == 1 branch of copy_tiles() is meant to narrow a changed tile's update
+rectangle to the columns that actually differ ("optimization for tall skinny
+lines, e.g. wm frame ... could help for a slow link"), but it ran *after* the
+memcpy() that copies the new tile data into main_fb, comparing s_dst against
+s_src over exactly the range memcpy() had just made identical.  memcmp()
+therefore never reported a difference, first_x/last_x stayed -1 for every tile,
+and hint_updates() took its `if (tx < 0)` fallback and sent the full tile width
+every time.  The optimization has never had any effect.
+
+Move the scan ahead of the memcpy() so it sees the old and new contents, and
+replace the per-pixel memcmp() loop with a byte scan that only examines the
+pixels that can still widen [first_x, last_x] - once the range spans the tile
+there is nothing left to learn.  memcmp() with a run-time length is never
+inlined, so the original cost one PLT call per pixel per line.
+
+first_diff_byte()/last_diff_byte() use SSE2 when the compiler advertises it
+(baseline on amd64) and a portable 64-bit word scan otherwise.  Neither reads
+outside [0,n): the 16-byte step is guarded by i+16<=n and the 8-byte step by
+i+8<=n, with a byte-wise remainder.
+
+Verified against the original loop over 400k randomized cases (pixelsize 1/2/4,
+widths 1..32), with and without SSE2.  End to end against a scrolling 2px-wide
+line, incremental traffic drops from 552,961 to 34,561 pixels while the client's
+reconstructed framebuffer stays byte-identical to a fresh full-screen capture.
+
+Not yet submitted upstream.
+
+diff --git a/src/scan.c b/src/scan.c
+index fce47da..d3d9971 100644
+--- a/src/scan.c
++++ b/src/scan.c
+@@ -47,6 +47,79 @@ so, delete this exception statement from your version.
+ #include "macosx.h"
+ #include "userinput.h"
+ 
++/*
++ * Byte-granular difference scanning helpers used by copy_tiles().
++ *
++ * Both return the index of the first (resp. last) differing byte in [0,n),
++ * or -1 if the ranges are equal.  Neither ever reads outside [0,n): the
++ * 16-byte SSE2 step is guarded by i+16<=n and the 8-byte step by i+8<=n,
++ * with a byte-wise remainder.  SSE2 is unconditionally available on x86_64
++ * and is used when the compiler advertises it; otherwise the portable
++ * 64-bit word path is used, which is still far faster than a per-pixel
++ * memcmp() call (memcmp() with a run-time length is never inlined).
++ */
++#if defined(__SSE2__)
++#include <emmintrin.h>
++#endif
++
++static int first_diff_byte(const char *a, const char *b, int n) {
++	int i = 0;
++#if defined(__SSE2__)
++	for (; i + 16 <= n; i += 16) {
++		__m128i va = _mm_loadu_si128((const __m128i *)(a + i));
++		__m128i vb = _mm_loadu_si128((const __m128i *)(b + i));
++		unsigned m = (unsigned) _mm_movemask_epi8(_mm_cmpeq_epi8(va, vb)) ^ 0xFFFFu;
++		if (m) return i + __builtin_ctz(m);
++	}
++#endif
++	for (; i + 8 <= n; i += 8) {
++		uint64_t x, y;
++		memcpy(&x, a + i, 8);
++		memcpy(&y, b + i, 8);
++		if (x != y) {
++			uint64_t d = x ^ y;
++#if __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__
++			return i + (int)(__builtin_ctzll(d) >> 3);
++#else
++			return i + (int)(__builtin_clzll(d) >> 3);
++#endif
++		}
++	}
++	for (; i < n; i++) {
++		if (a[i] != b[i]) return i;
++	}
++	return -1;
++}
++
++static int last_diff_byte(const char *a, const char *b, int n) {
++	int i = n;
++#if defined(__SSE2__)
++	for (; i - 16 >= 0; i -= 16) {
++		__m128i va = _mm_loadu_si128((const __m128i *)(a + i - 16));
++		__m128i vb = _mm_loadu_si128((const __m128i *)(b + i - 16));
++		unsigned m = (unsigned) _mm_movemask_epi8(_mm_cmpeq_epi8(va, vb)) ^ 0xFFFFu;
++		if (m) return i - 16 + (31 - __builtin_clz(m));
++	}
++#endif
++	for (; i - 8 >= 0; i -= 8) {
++		uint64_t x, y;
++		memcpy(&x, a + i - 8, 8);
++		memcpy(&y, b + i - 8, 8);
++		if (x != y) {
++			uint64_t d = x ^ y;
++#if __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__
++			return i - 8 + 7 - (int)(__builtin_clzll(d) >> 3);
++#else
++			return i - 8 + 7 - (int)(__builtin_ctzll(d) >> 3);
++#endif
++		}
++	}
++	for (; i > 0; i--) {
++		if (a[i-1] != b[i-1]) return i-1;
++	}
++	return -1;
++}
++
+ /*
+  * routines for scanning and reading the X11 display for changes, and
+  * for doing all the tile work (shm, etc).
+@@ -2016,34 +2089,50 @@ static int copy_tiles(int tx, int ty, int nt) {
+ 	s_dst = dst + main_bytes_per_line * first_min;
+ 
+ 	for (line = first_min; line <= last_max; line++) {
+-		/* for I/O speed we do not do this tile by tile */
+-		memcpy(s_dst, s_src, (size_t)size_x * pixelsize);
+ 		if (nt == 1) {
+ 			/*
+-			 * optimization for tall skinny lines, e.g. wm
+-			 * frame. try to find first_x and last_x to limit
+-			 * the size of the hint.  could help for a slow
+-			 * link.  Unfortunately we spent a lot of time
+-			 * reading in the many tiles.
++			 * Optimization for tall skinny changes, e.g. a wm
++			 * frame: find first_x and last_x to limit the width
++			 * of the hint.  Helps on a slow link.
++			 *
++			 * NOTE: this MUST run before the memcpy() below.
++			 * It used to run after, comparing s_dst against
++			 * s_src over exactly the range the memcpy() had
++			 * just made identical, so it could never find a
++			 * difference and first_x/last_x stayed -1 forever
++			 * -- hint_updates() then always fell back to the
++			 * full tile width.
+ 			 *
+-			 * BTW, we like to think the above memcpy leaves
+-			 * the data we use below in the cache... (but
+-			 * it could be two 128 byte segments at 32bpp)
+-			 * so this inner loop is not as bad as it seems.
++			 * Only pixels that can still widen [first_x,last_x]
++			 * are examined, so once the range spans the tile
++			 * there is nothing left to do.
+ 			 */
+-			int k, kx;
+-			kx = pixelsize;
+-			for (k=0; k<size_x; k++) {
+-				if (memcmp(s_dst + k*kx, s_src + k*kx, kx))  {
+-					if (first_x == -1 || k < first_x) {
++			if (first_x != 0 || last_x != size_x - 1) {
++				int nb = size_x * pixelsize;
++				int lo = (first_x == -1) ? nb : first_x * pixelsize;
++				int hi = (last_x  == -1) ?  0 : (last_x + 1) * pixelsize;
++				int d;
++
++				if (lo > 0) {
++					d = first_diff_byte(s_dst, s_src, lo);
++					if (d >= 0) {
++						int k = d / pixelsize;
+ 						first_x = k;
++						if (last_x < k) last_x = k;
+ 					}
+-					if (last_x == -1 || k > last_x) {
++				}
++				if (hi < nb) {
++					d = last_diff_byte(s_dst + hi, s_src + hi, nb - hi);
++					if (d >= 0) {
++						int k = (hi + d) / pixelsize;
+ 						last_x = k;
++						if (first_x == -1 || k < first_x) first_x = k;
+ 					}
+ 				}
+ 			}
+ 		}
++		/* for I/O speed we do not do this tile by tile */
++		memcpy(s_dst, s_src, (size_t)size_x * pixelsize);
+ 		s_src += tile_row[nt]->bytes_per_line;
+ 		s_dst += main_bytes_per_line;
+ 	}
