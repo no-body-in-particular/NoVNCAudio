@@ -1,10 +1,16 @@
 #!/usr/bin/env python3
-"""Sort ~/Music into Artist/Album folders and give every track its cover art.
+"""Give every track in ~/Music its tags and cover art.
 
-The library this was written for is built by youtube.py, and yt-dlp writes no
-tags at all - every file comes out with nothing but `encoder=Lavf...`, no
-artist, no album, no embedded picture. So neither the folder layout nor the
-artwork can be read out of the files; both have to be reconstructed.
+The library this was written for is built by youtube.py, and older downloads
+carry no tags at all - nothing but `encoder=Lavf...`, no artist, no album, no
+embedded picture. So the metadata cannot be read out of the files and has to be
+reconstructed from their names.
+
+By default files are tagged where they lie: the per-playlist folders yt-dlp
+creates are the layout this library is kept in, and this script does not
+disturb them. `--sort` additionally reorganises everything into Artist/Album
+folders, which is a large and rarely wanted change - the undo script it writes
+puts every file back if you try it and dislike the result.
 
 Two sources of truth, in order of trust:
 
@@ -440,15 +446,19 @@ def duration(path: str) -> float:
         return 0.0
 
 
-def has_art(path: str) -> bool:
+def probe(path: str) -> tuple[bool, str]:
+    """(has embedded picture, artist tag) in one ffprobe call."""
     try:
         out = subprocess.run(
-            ["ffprobe", "-v", "quiet", "-select_streams", "v",
-             "-show_entries", "stream=codec_name", "-of", "csv=p=0", path],
-            capture_output=True, text=True, timeout=60).stdout.strip()
-        return bool(out)
-    except (OSError, subprocess.SubprocessError):
-        return False
+            ["ffprobe", "-v", "quiet", "-print_format", "json",
+             "-show_format", "-show_streams", path],
+            capture_output=True, text=True, timeout=60).stdout
+        d = json.loads(out)
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return False, ""
+    art = any(st.get("codec_type") == "video" for st in d.get("streams", []))
+    tags = {k.lower(): v for k, v in (d.get("format", {}).get("tags") or {}).items()}
+    return art, str(tags.get("artist", ""))
 
 
 def write_track(src: str, dst: str, meta: dict, art: bytes | None,
@@ -541,7 +551,7 @@ def prune_empty(root: str, apply: bool) -> int:
 
 def main() -> int:
     ap = argparse.ArgumentParser(
-        description="Sort ~/Music into Artist/Album folders and embed cover art.",
+        description="Tag ~/Music and embed cover art; optionally reorganise it.",
         epilog="Without --apply nothing is written; the plan is printed and that is all.")
     ap.add_argument("--apply", action="store_true",
                     help="actually retag, embed art and move files")
@@ -553,8 +563,11 @@ def main() -> int:
     ap.add_argument("--loose", action="store_true",
                     help="accept the best title match even without corroboration")
     ap.add_argument("--no-art", action="store_true", help="skip artwork entirely")
-    ap.add_argument("--no-move", action="store_true",
-                    help="tag and embed art in place, do not reorganise")
+    ap.add_argument("--sort", action="store_true",
+                    help="also reorganise into Artist/Album folders; off by default,\n"
+                         "                          because the playlist folders yt-dlp"
+                         " creates are the\n                          layout this"
+                         " library is kept in")
     ap.add_argument("--delay", type=float, default=0.2,
                     help="seconds between Deezer calls (default 0.2); the iTunes\n                          fallback is never paced faster than 3s")
     ap.add_argument("--offline", action="store_true",
@@ -614,7 +627,7 @@ def main() -> int:
         artist_dir = safe_name(p["artist"], UNKNOWN_ARTIST)
         album_dir = safe_name(p["album"], UNKNOWN_ALBUM)
         fname = safe_name(p["title"], os.path.splitext(os.path.basename(p["src"]))[0]) + ext
-        if args.no_move:
+        if not args.sort:
             p["dst"] = p["src"]
         else:
             dst = os.path.join(root, artist_dir, album_dir, fname)
@@ -657,10 +670,15 @@ def main() -> int:
         if p["art"] and not args.no_art:
             art_bytes = fetch_art(p["art"])
 
-        # Already carries a picture and is not moving anywhere: leave it be.
-        if src == dst and has_art(src) and args.no_move:
-            skipped += 1
-            continue
+        # Nothing to do for a file that is staying put, already names an
+        # artist and already carries a picture (or has none on offer). Without
+        # this a second run would remux the whole library to write the tags it
+        # wrote last time.
+        if src == dst:
+            had_art, had_artist = probe(src)
+            if had_artist and (had_art or not art_bytes):
+                skipped += 1
+                continue
 
         art_tmp = None
         if art_bytes:
@@ -699,7 +717,7 @@ def main() -> int:
 
     undo.close()
 
-    pruned = prune_empty(root, apply=True) if not args.no_move else 0
+    pruned = prune_empty(root, apply=True) if args.sort else 0
 
     if args.clear_player_cache:
         n = 0
