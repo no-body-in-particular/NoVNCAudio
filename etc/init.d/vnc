@@ -86,16 +86,21 @@ start_vnc() {
 	# latency here: median ~26-33ms -> ~6ms, p90 ~56ms -> ~9ms, for 9% -> 12%
 	# of a core under continuous redraw. The server idles near 2%.
 	#
+	# -xrandr: without it x11vnc assumes the screen never changes size and,
+	# in its own words responds to an XRANDR event by "simply crashing by
+	# assuming the old screen size". Any resolution change would take it
+	# down, including the one the Xorg config now makes at session start.
+	#
 	# LD_PRELOAD of zlib-ng: Tight and ZRLE both drive zlib. zlib-ng emits
 	# ~11.5% smaller Tight frames for the same screen (11,138 -> 9,858 bytes on
 	# one identical frame; ZRLE unchanged), CPU a wash. Preloaded for x11vnc
 	# alone rather than installed over the system libz. Drop it to revert.
 	einfo "starting x11vnc for :$1 on port 580$1"
 	as_user "source /etc/profile; /bin/shm_clear -y >/dev/null 2>&1; \
-		export UNIXPW_DISABLE_SSL=1 UNIXPW_DISABLE_LOCALHOST=1 FD_GEOM=1920x1080; \
+		export UNIXPW_DISABLE_SSL=1 UNIXPW_DISABLE_LOCALHOST=1 FD_GEOM=1600x900; \
 		export LD_PRELOAD=/usr/local/lib/zlib-ng/libz.so.1; \
 		cd ~ && exec x11vnc -threads -forever -nevershared -nomodtweak -noxkb \
-		  -wait 5 -defer 5 \
+		  -wait 5 -defer 5 -xrandr \
 		  -rfbport 580$1 -nopw -loop -display :$1 \
 		  -ssl /etc/cert.pem -sslverify /etc/vnc-ca/ca.crt \
 		  -repeat -clear_all -skip_lockkeys -auth /home/$2/.Xauthority" "$2" \
