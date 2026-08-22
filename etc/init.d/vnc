@@ -86,11 +86,22 @@ start_vnc() {
 	# on the box changes. Round-trip compatibility with stock zlib was checked
 	# both directions using the Z_SYNC_FLUSH streaming pattern libvncserver
 	# actually uses. Drop the LD_PRELOAD= below to revert.
+	#
+	# -nevershared (was -alwaysshared): "always treat new clients as shared"
+	# means existing clients are never disconnected, so a stale or forgotten
+	# session kept holding the display and a newly opened one could not take
+	# over. noVNC sends shared=1 itself (rfb.js _sendClientInit), so the server
+	# has to override it. -nevershared forces every new client to non-shared,
+	# which is the standard VNC behaviour: connecting disconnects whoever was
+	# there. Verified with two real clients against a scratch display - with
+	# -alwaysshared both stayed connected, with -nevershared the first was
+	# dropped and the second got in. Do NOT add -dontdisconnect: that refuses
+	# the *new* connection instead, which is the opposite of what we want.
 	glog "x11vnc for :$1 is down - starting on port 580$1"
 	as_user "source /etc/profile; /bin/shm_clear -y >/dev/null 2>&1; \
 		export UNIXPW_DISABLE_SSL=1 UNIXPW_DISABLE_LOCALHOST=1 FD_GEOM=1920x1080; \
 		export LD_PRELOAD=/usr/local/lib/zlib-ng/libz.so.1; \
-		cd ~ && exec x11vnc -threads -forever -alwaysshared -nomodtweak -noxkb \
+		cd ~ && exec x11vnc -threads -forever -nevershared -nomodtweak -noxkb \
 		  -wait 5 -defer 5 \
 		  -rfbport 580$1 -nopw -loop -display :$1 \
 		  -ssl /etc/cert.pem -sslverify /etc/vnc-ca/ca.crt \
