@@ -160,7 +160,22 @@
          (function primeThenStart() {
             const frame = document.getElementById('certPrimeVnc');
             let started = false;
-            const go = () => { if (!started) { started = true; vnc.start(); } };
+            // Compile the wasm zlib before connecting. The decoders build their
+            // Inflate objects inside the RFB constructor, which runs in
+            // vnc.start(), and that constructor is synchronous - so the module
+            // has to be ready by then or every stream quietly uses pako. The
+            // dynamic import resolves to the same module instance the decoders
+            // import statically, so setting it up here is enough.
+            // .catch/.finally: a missing or broken module must never stop the
+            // session starting - inflator.js falls back to pako on its own.
+            const go = () => {
+               if (started) { return; }
+               started = true;
+               import('./inflator.js')
+                  .then(m => m.initInflateWasm('./zinflate.wasm'))
+                  .catch(() => {})
+                  .finally(() => vnc.start());
+            };
             // x11vnc is not a web server, so the request itself fails after the
             // handshake - fine, the handshake was the point. Either outcome
             // means the certificate decision has been made.
