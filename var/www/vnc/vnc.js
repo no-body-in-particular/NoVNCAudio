@@ -218,6 +218,17 @@ export default class VNC {
         return defaultValue;
     }
 
+    // Query variables arrive as strings, and every non-empty string is truthy -
+    // so ?scale=false used to switch scaling ON. Anything meant as a flag has to
+    // come through here instead.
+    readQueryFlag(name, defaultValue) {
+        const raw = this.readQueryVariable(name, null);
+        if (raw === null) {
+            return defaultValue;
+        }
+        return !/^(0|false|no|off)$/i.test(raw.trim());
+    }
+
     setQuality(quality) {
         this.rfb.qualityLevel = parseInt(quality);
     }
@@ -245,8 +256,13 @@ export default class VNC {
         this.hookClipboard();
 
         // Set parameters that can be changed on an active connection
-        this.rfb.viewOnly = this.readQueryVariable('view_only', false);
-        this.rfb.scaleViewport = this.readQueryVariable('scale', true);
+        this.rfb.viewOnly = this.readQueryFlag('view_only', false);
+        // Scaling off by default: the framebuffer is a fixed 1920x1080, so
+        // fitting it to the window resamples every frame and, on a HiDPI
+        // display, never lines up with device pixels - permanently soft. Off,
+        // pixels map 1:1 and the browser does no resampling at all.
+        // Re-enable per session with ?scale=true.
+        this.rfb.scaleViewport = this.readQueryFlag('scale', false);
 
         // Apply the image settings at connect. They were only ever set from the slider's onchange,
         // so at load neither was applied and noVNC quietly used its own defaults - the 9 and 4 the
@@ -256,9 +272,14 @@ export default class VNC {
         this.rfb.qualityLevel = parseInt(this.readQueryVariable('quality', 3), 10);
         this.rfb.compressionLevel = parseInt(this.readQueryVariable('compression', 6), 10);
 
-        // Only redraw what actually changed, and let the browser composite the scaling, so a
-        // resize or a partial update does not repaint the whole canvas.
-        this.rfb.clipViewport = this.readQueryVariable('clip', false);
+        // Clipping must follow scaling, not be chosen independently. #screen is
+        // overflow:hidden, so an unscaled 1920x1080 canvas in a smaller window
+        // would have its right and bottom edges cut off with no scrollbars and
+        // no way to reach them. clipViewport gives a draggable viewport
+        // instead, which is what makes scaling-off usable. If scaling is turned
+        // back on the canvas always fits, so clipping is not wanted - hence the
+        // default tracks scaleViewport rather than being a fixed value.
+        this.rfb.clipViewport = this.readQueryFlag('clip', !this.rfb.scaleViewport);
     }
 
 }
