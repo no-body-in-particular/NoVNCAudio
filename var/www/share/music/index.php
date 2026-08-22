@@ -132,6 +132,26 @@ if (isset($_GET['cover'])) {
 }
 
 
+// ---- album art for one track: the picture embedded in that file ----------
+// The ?cover= endpoint above answers for a folder, which was enough while a
+// folder was an album. It is not enough here: these folders are yt-dlp
+// playlists, so every track in one can be a different record. organize.py
+// embeds each track's own artwork, so serve that per file and let the folder
+// cover stay the fallback.
+if (isset($_GET['trackcover'])) {
+    $f = resolve((string)$_GET['trackcover']);
+    if ($f === null || !is_file($f) || !is_readable($f) || !is_audio($f)) { fail(404, 'not found'); }
+    $cf = cache_path(sha1('trackcover|' . $f . '|' . filemtime($f) . '|' . filesize($f)) . '.jpg');
+    if (!is_file($cf) || filesize($cf) === 0) {
+        @exec(sprintf('ffmpeg -nostdin -loglevel error -i %s -an -map 0:v? -frames:v 1 -vf scale=400:-1 -y %s 2>/dev/null',
+              escapeshellarg($f), escapeshellarg($cf)));
+        if (!is_file($cf) || filesize($cf) === 0) { @unlink($cf); fail(404, 'no cover'); }
+    }
+    header('Content-Type: image/jpeg');
+    header('Cache-Control: private, max-age=86400');
+    readfile($cf); exit;
+}
+
 // ---- YouTube download -----------------------------------------------------
 // Calls /tmp/youtube.py, which wraps yt-dlp and writes MP3s into a subfolder of
 // the destination named after the playlist (or the video title for a single
@@ -334,6 +354,15 @@ td.num{width:34px;color:var(--dim);text-align:right;font-variant-numeric:tabular
 td.ar{color:var(--dim);width:34%}
 td.d{width:60px;text-align:right;color:var(--dim);font-variant-numeric:tabular-nums}
 .folderrow a{color:var(--fg);text-decoration:none}
+/* Playing a whole folder used to mean selecting its row first and then
+   pressing the transport button, which nothing on screen suggested. The row
+   carries its own button now; it stays faint until the row is hovered or the
+   button is focused, so the list does not turn into a wall of triangles. */
+.rowplay{background:none;border:0;color:var(--dim);cursor:pointer;font:inherit;padding:0 6px;
+         border-radius:4px;opacity:0;transition:opacity .12s}
+tr.folderrow:hover .rowplay,.rowplay:focus{opacity:1}
+.rowplay:hover{color:var(--sel)}
+@media (hover:none){.rowplay{opacity:1}}
 .player{flex:none;display:flex;flex-direction:column;gap:5px;padding:7px 12px 9px;background:var(--head);
         border-top:1px solid var(--line)}
 .prow{display:flex;align-items:center;gap:12px;min-width:0}
@@ -404,7 +433,9 @@ input[type=range]{width:100%;accent-color:var(--sel)}
         ondblclick="location.href='?d=<?= urlencode($p) ?>'"
         title="Click to select, double-click or click the name to open">
       <td class="num">📁</td>
-      <td colspan="3"><a href="?d=<?= urlencode($p) ?>" onclick="event.stopPropagation()"><?= $h($f) ?></a></td></tr>
+      <td colspan="3"><a href="?d=<?= urlencode($p) ?>" onclick="event.stopPropagation()"><?= $h($f) ?></a><button
+          class="rowplay" title="Play everything in this folder"
+          onclick="event.stopPropagation(); playFolder(this.closest('tr').dataset.folder)">▶</button></td></tr>
   <?php endforeach; ?>
   <?php foreach ($tracks as $i => $t): ?>
     <tr id="tr<?= $i ?>" onclick="play(<?= $i ?>)">
@@ -425,7 +456,7 @@ input[type=range]{width:100%;accent-color:var(--sel)}
     <span class="time" id="dur">0:00</span>
   </div>
   <div class="prow">
-  <div class="art"><?php if ($dirRel !== ''): ?><img id="art" alt="" src="?cover=<?= urlencode($dirRel) ?>" onerror="this.remove()"><?php endif; ?></div>
+  <div class="art"><img id="art" alt="" hidden></div>
   <div class="np"><div class="t" id="npT">Nothing playing</div><div class="a" id="npA"></div></div>
   <div class="ctrls">
     <button onclick="prev()" title="Previous">
@@ -467,6 +498,7 @@ function play(i){
   au.play().catch(e => { document.getElementById('npT').textContent = 'Cannot play: ' + e.message; });
   document.getElementById('npT').textContent = TRACKS[i].title;
   document.getElementById('npA').textContent = TRACKS[i].artist;
+  setArt(TRACKS[i].file);
   document.querySelectorAll('tr.playing').forEach(t=>t.classList.remove('playing'));
   document.getElementById('tr'+i)?.classList.add('playing');
   if (!order.length) buildOrder();
@@ -543,16 +575,33 @@ const hasMS = 'mediaSession' in navigator;
 
 function folderOf(file){ const i = file.lastIndexOf('/'); return i < 0 ? '' : file.slice(0, i); }
 
+// Artwork for the track that is playing. Tries the picture embedded in the
+// file first, falls back to a cover in its folder, and hides the element if
+// neither exists - the <img> is kept in the DOM either way so the next track
+// can fill it. Both endpoints 404 cheaply when there is nothing to serve.
+function setArt(file){
+  const img = document.getElementById('art');
+  if (!img) return;
+  let stage = 0;
+  img.onload  = () => { img.hidden = false; };
+  img.onerror = () => {
+    if (stage === 0) { stage = 1; img.src = '?cover=' + encodeURIComponent(folderOf(file)); }
+    else { img.hidden = true; img.onerror = null; }
+  };
+  img.src = '?trackcover=' + encodeURIComponent(file);
+}
+
 function updateSession(i){
   if (!hasMS || !TRACKS[i]) return;
   const dir = folderOf(TRACKS[i].file);
-  const art = new URL('?cover=' + encodeURIComponent(dir), location.href).href;
+  const art = new URL('?trackcover=' + encodeURIComponent(TRACKS[i].file), location.href).href;
   navigator.mediaSession.metadata = new MediaMetadata({
     title:  TRACKS[i].title,
     artist: TRACKS[i].artist || '',
     album:  dir.split('/').pop() || 'Music',
-    // If the folder has no cover this 404s and the platform just shows nothing,
-    // which is better than omitting artwork entirely on devices that do have it.
+    // If the file carries no picture this 404s and the platform just shows
+    // nothing, which is better than omitting artwork entirely on devices that
+    // do have it.
     artwork: [{src: art, sizes: '400x400', type: 'image/jpeg'}],
   });
 }
