@@ -2,38 +2,32 @@
 # Copyright 1999-2014 Gentoo Foundation
 # Distributed under the terms of the GNU General Public License, v2 or later
 #
-# Starts tcpulse and supervises the X session and its x11vnc.
+# Starts tcpulse, the X session and its x11vnc. One script, no daemon.
 #
-# Why the supervisor exists: .xinitrc ends in a `while pgrep dwm; sleep 1; done`
-# loop, so the X server's lifetime is tied to the window manager. If dwm dies -
-# or anything kills the startx/xinit process tree - X shuts down cleanly and
-# takes every application and shell in the session with it. supervise() notices
-# within $INTERVAL and brings X, then x11vnc, back.
+# There is deliberately NO supervision loop here any more. An earlier version
+# kept a long-running shell (supervise(), previously /usr/local/bin/vnc-session-
+# guard) polling every 5s to restart X and x11vnc. That had two costs:
 #
-# It used to live in /usr/local/bin/vnc-session-guard. It is inline here so
-# there is exactly one launcher: previously the init script and a separately
-# started guard both managed x11vnc, several copies of each ended up running,
-# and every loser that could not bind the port died with BadShmSeg and was
-# restarted by x11vnc's own -loop about 24 times a minute - forever, burning
-# ~1.8% of a core and writing ~144 MB/day to /var/log/vncserver.2.log.
+#   1. A long-running shell holds the script's function definitions in memory
+#      as they were when it started, so editing this file changed nothing until
+#      that process was restarted - flag changes appeared to be ignored.
+#   2. Two launchers both managing x11vnc meant several copies could run; the
+#      losers could not bind the rfb port, died with BadShmSeg, and were
+#      restarted by x11vnc's own -loop ~24 times a minute.
 #
-# The flock in supervise() is what makes that impossible to repeat: however
-# many times this script is started, only one supervisor can hold the lock.
+# Trade-off to be aware of: .xinitrc ends in a `while pgrep dwm; sleep 1; done`
+# loop, so the X server's lifetime is tied to the window manager. With nothing
+# supervising, a dead dwm - or anything that kills the startx/xinit tree - ends
+# the session and it stays down until someone runs `rc-service vnc start`.
+#
+# Every function below is idempotent: start() only starts what is not already
+# running, so it is safe to re-run against a live session to pick up changes to
+# this file (e.g. to restart just x11vnc after editing its flags).
 
 DISPLAYS="1000:2"
-INTERVAL="${INTERVAL:-5}"
-GUARDLOG="/var/log/vnc-session-guard.log"
-LOCKFILE="/run/vnc-supervise.lock"
-PIDFILE="/run/vnc-supervise.pid"
-
-extra_commands="supervise"
 
 depend() {
 	need net
-}
-
-glog() {
-	echo "$(date '+%F %T') $*" >>"$GUARDLOG"
 }
 
 # Run $1 as user $2.
@@ -56,48 +50,47 @@ vnc_alive() {
 		END {exit !found}'
 }
 
+tcpulse_alive() {
+	# $1 = display number
+	ps -eo comm=,args= | awk -v p="570$1" '
+		$1=="tcpulse" && index($0,p) {found=1}
+		END {exit !found}'
+}
+
 start_x() {
 	# $1 = display number, $2 = user
-	glog "X on :$1 is down - starting"
+	einfo "starting X on :$1"
 	rm -f "/tmp/.X$1-lock" 2>/dev/null
-	as_user "cd ~ && exec startx -- :$1" "$2" 9>&- >>"/var/log/x11.$2.log" 2>&1 &
+	as_user "cd ~ && exec startx -- :$1" "$2" >>"/var/log/x11.$2.log" 2>&1 &
 	for _ in $(seq 1 30); do
 		sleep 1
-		x_alive "$1" && { glog "X on :$1 is up"; return 0; }
+		x_alive "$1" && return 0
 	done
-	glog "X on :$1 failed to come up within 30s"
+	eerror "X on :$1 failed to come up within 30s"
 	return 1
 }
 
 start_vnc() {
 	# $1 = display number, $2 = user
 	#
+	# -nevershared: "never treat new clients as shared", so a new connection
+	# disconnects whoever was there. With the previous -alwaysshared, existing
+	# clients were never dropped and a stale session kept holding the display,
+	# so a newly opened one could not get in. noVNC sends shared=1 itself
+	# (rfb.js ClientInitialisation), so the server has to override it. Do NOT
+	# add -dontdisconnect: that refuses the *new* connection instead.
+	#
 	# -wait 5 -defer 5 (defaults are 20/20): -wait is the framebuffer poll
 	# interval, -defer the delay before sending an update, so the defaults add
 	# up to ~40ms before a change reaches the client. Measured draw-to-client
 	# latency here: median ~26-33ms -> ~6ms, p90 ~56ms -> ~9ms, for 9% -> 12%
-	# of a core under continuous redraw. The server idles near 2%, so there is
-	# room. Lower still (2/2) measured ~3ms but with little left to gain.
+	# of a core under continuous redraw. The server idles near 2%.
 	#
 	# LD_PRELOAD of zlib-ng: Tight and ZRLE both drive zlib. zlib-ng emits
-	# ~11.5% smaller Tight frames for the same screen (11,138 -> 9,858 bytes
-	# on one identical frame; ZRLE unchanged), with CPU a wash. Preloaded for
-	# x11vnc alone rather than installed over the system libz, so nothing else
-	# on the box changes. Round-trip compatibility with stock zlib was checked
-	# both directions using the Z_SYNC_FLUSH streaming pattern libvncserver
-	# actually uses. Drop the LD_PRELOAD= below to revert.
-	#
-	# -nevershared (was -alwaysshared): "always treat new clients as shared"
-	# means existing clients are never disconnected, so a stale or forgotten
-	# session kept holding the display and a newly opened one could not take
-	# over. noVNC sends shared=1 itself (rfb.js _sendClientInit), so the server
-	# has to override it. -nevershared forces every new client to non-shared,
-	# which is the standard VNC behaviour: connecting disconnects whoever was
-	# there. Verified with two real clients against a scratch display - with
-	# -alwaysshared both stayed connected, with -nevershared the first was
-	# dropped and the second got in. Do NOT add -dontdisconnect: that refuses
-	# the *new* connection instead, which is the opposite of what we want.
-	glog "x11vnc for :$1 is down - starting on port 580$1"
+	# ~11.5% smaller Tight frames for the same screen (11,138 -> 9,858 bytes on
+	# one identical frame; ZRLE unchanged), CPU a wash. Preloaded for x11vnc
+	# alone rather than installed over the system libz. Drop it to revert.
+	einfo "starting x11vnc for :$1 on port 580$1"
 	as_user "source /etc/profile; /bin/shm_clear -y >/dev/null 2>&1; \
 		export UNIXPW_DISABLE_SSL=1 UNIXPW_DISABLE_LOCALHOST=1 FD_GEOM=1920x1080; \
 		export LD_PRELOAD=/usr/local/lib/zlib-ng/libz.so.1; \
@@ -106,44 +99,15 @@ start_vnc() {
 		  -rfbport 580$1 -nopw -loop -display :$1 \
 		  -ssl /etc/cert.pem -sslverify /etc/vnc-ca/ca.crt \
 		  -repeat -clear_all -skip_lockkeys -auth /home/$2/.Xauthority" "$2" \
-		9>&- >>"/var/log/vncserver.$1.log" 2>&1 &
-	sleep 5
-	vnc_alive "$1" && glog "x11vnc for :$1 is up"
+		>>"/var/log/vncserver.$1.log" 2>&1 &
+	sleep 3
 }
 
 start_tcpulse() {
 	# $1 = display number, $2 = user
+	einfo "starting tcpulse on port 570$1"
 	as_user "TCPULSE_CLIENT_CA=/etc/vnc-ca/ca.crt /bin/tcpulse /etc/cert.pem 570$1" "$2" \
-		9>&- >"/var/log/tcpulse.$2.log" 2>&1 &
-}
-
-# The supervision loop. Holds an exclusive lock for its whole lifetime, so a
-# second copy - however it was started - logs and exits instead of racing this
-# one for the rfb port.
-supervise() {
-	# NOTE: every child spawned below closes fd 9 (9>&-). Without that the whole
-	# X session tree - startx, xinit, X, dwm, and every app - inherits this fd
-	# and keeps the lock held for as long as the session lives, so a replacement
-	# supervisor can never acquire it.
-	exec 9>"$LOCKFILE"
-	if ! flock -n 9; then
-		glog "supervisor already running - exiting"
-		return 0
-	fi
-	glog "supervisor started (displays '$DISPLAYS', interval ${INTERVAL}s)"
-	while true; do
-		for user in $DISPLAYS; do
-			usrid=${user%%:*}
-			usrname=$(id -u -n "$usrid")
-			usrdisp=${user##*:}
-			if ! x_alive "$usrdisp"; then
-				start_x "$usrdisp" "$usrname" && start_vnc "$usrdisp" "$usrname"
-			elif ! vnc_alive "$usrdisp"; then
-				start_vnc "$usrdisp" "$usrname"
-			fi
-		done
-		sleep "$INTERVAL"
-	done
+		>"/var/log/tcpulse.$2.log" 2>&1 &
 }
 
 start() {
@@ -153,29 +117,29 @@ start() {
 		usrid=${user%%:*}
 		usrname=$(id -u -n "$usrid")
 		usrdisp=${user##*:}
-		# X and x11vnc are started by the supervisor below, not here - starting
-		# startx here as well would race with it.
-		start_tcpulse "$usrdisp" "$usrname"
-	done
 
-	if [ -f "$PIDFILE" ] && kill -0 "$(cat "$PIDFILE" 2>/dev/null)" 2>/dev/null; then
-		einfo "supervisor already running (pid $(cat "$PIDFILE"))"
-	else
-		( supervise ) >/dev/null 2>&1 &
-		echo $! >"$PIDFILE"
-		einfo "supervisor started (pid $(cat "$PIDFILE"))"
-	fi
+		# Idempotent: only start what is not already up, so re-running this
+		# against a live session picks up flag changes without touching X.
+		tcpulse_alive "$usrdisp" || start_tcpulse "$usrdisp" "$usrname"
+
+		if x_alive "$usrdisp"; then
+			einfo "X on :$usrdisp already running"
+		else
+			start_x "$usrdisp" "$usrname" || continue
+		fi
+
+		if vnc_alive "$usrdisp"; then
+			einfo "x11vnc for :$usrdisp already running"
+		else
+			start_vnc "$usrdisp" "$usrname"
+		fi
+	done
 
 	eend 0
 }
 
 stop() {
 	ebegin "Stopping VNC server"
-
-	if [ -f "$PIDFILE" ]; then
-		kill "$(cat "$PIDFILE" 2>/dev/null)" 2>/dev/null
-		rm -f "$PIDFILE" 2>/dev/null
-	fi
 
 	for user in $DISPLAYS; do
 		usrid=${user%%:*}
@@ -192,6 +156,23 @@ stop() {
 
 	eend 0
 }
+
+# Restart only x11vnc, leaving X and every application in the session running.
+# This is the safe way to apply changes to start_vnc()'s flags.
+restart_vnc() {
+	ebegin "Restarting x11vnc only"
+	for user in $DISPLAYS; do
+		usrid=${user%%:*}
+		usrname=$(id -u -n "$usrid")
+		usrdisp=${user##*:}
+		pkill -U "$usrid" -f "x11vnc .*-display :$usrdisp"
+		sleep 2
+		start_vnc "$usrdisp" "$usrname"
+	done
+	eend 0
+}
+
+extra_commands="restart_vnc"
 
 restart() {
 	svc_stop
