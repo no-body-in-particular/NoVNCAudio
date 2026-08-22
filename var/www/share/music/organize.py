@@ -700,8 +700,14 @@ def main() -> int:
 
         # A cover file next to the tracks: index.php prefers it over the
         # embedded picture and serves it without shelling out to ffmpeg.
+        #
+        # Only when sorting, because only then is the folder an album. Left in
+        # for an in-place run it drops one track's cover into a playlist folder
+        # holding hundreds of different records, and since the player prefers a
+        # folder cover to the embedded picture, that one image would then stand
+        # in for every track in the folder.
         album_dir = os.path.dirname(dst)
-        if art_bytes and album_dir not in covers_written:
+        if args.sort and art_bytes and album_dir not in covers_written:
             cover = os.path.join(album_dir, COVER_NAME)
             if not os.path.exists(cover):
                 try:
