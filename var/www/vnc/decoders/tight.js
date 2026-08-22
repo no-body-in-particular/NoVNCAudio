@@ -169,12 +169,14 @@ export default class TightDecoder {
             this._zlibs[streamId].setInput(null);
         }
 
-        let rgbx = new Uint8Array(width * height * 4);
-        for (let i = 0, j = 0; i < width * height * 4; i += 4, j += 3) {
-            rgbx[i]     = data[j];
-            rgbx[i + 1] = data[j + 1];
-            rgbx[i + 2] = data[j + 2];
-            rgbx[i + 3] = 255;  // Alpha
+        const px = width * height;
+        const rgbx = new Uint8Array(px * 4);
+        // One 32-bit store per pixel rather than four byte stores (~1.5x).
+        // rgbx is freshly allocated, so the Uint32Array view is aligned.
+        const rgbx32 = new Uint32Array(rgbx.buffer);
+        for (let i = 0, j = 0; i < px; i++, j += 3) {
+            rgbx32[i] = ((255 << 24) | (data[j + 2] << 16) |
+                         (data[j + 1] << 8) | data[j]) >>> 0;
         }
 
         display.blitImage(x, y, width, height, rgbx, 0, false);
