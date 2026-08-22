@@ -45,7 +45,13 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['confirm'] ?? '') === 'yes'
     // this PHP process *is* uid 1000 - run inline it would kill itself midway
     // and could leave the service stopped. sudo makes the child root, so the
     // pkill does not reach it, and setsid puts it outside this process group.
-    $cmd = sprintf('setsid sudo -n /etc/init.d/vnc restart > %s 2>&1 &', escapeshellarg(LOG));
+    // The redirect has to happen *inside* sudo. Written as
+    //     setsid sudo -n /etc/init.d/vnc restart > /var/log/... &
+    // the shell performs the redirect before sudo elevates, i.e. as the CGI
+    // user, and /var/log is root-owned - so it failed with "Permission denied"
+    // and the restart never ran at all, silently and with no log to show for it.
+    $inner = sprintf('/etc/init.d/vnc restart > %s 2>&1', escapeshellarg(LOG));
+    $cmd   = sprintf('setsid sudo -n /bin/sh -c %s &', escapeshellarg($inner));
     @exec('/bin/sh -c ' . escapeshellarg($cmd) . ' >/dev/null 2>&1');
     $started = true;
 }
