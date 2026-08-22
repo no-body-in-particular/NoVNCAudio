@@ -60,7 +60,7 @@ start_x() {
 	# $1 = display number, $2 = user
 	glog "X on :$1 is down - starting"
 	rm -f "/tmp/.X$1-lock" 2>/dev/null
-	as_user "cd ~ && exec startx -- :$1" >>"/var/log/x11.$2.log" 2>&1 &
+	as_user "cd ~ && exec startx -- :$1" "$2" 9>&- >>"/var/log/x11.$2.log" 2>&1 &
 	for _ in $(seq 1 30); do
 		sleep 1
 		x_alive "$1" && { glog "X on :$1 is up"; return 0; }
@@ -94,22 +94,26 @@ start_vnc() {
 		  -wait 5 -defer 5 \
 		  -rfbport 580$1 -nopw -loop -display :$1 \
 		  -ssl /etc/cert.pem -sslverify /etc/vnc-ca/ca.crt \
-		  -repeat -clear_all -skip_lockkeys -auth /home/$2/.Xauthority" \
-		>>"/var/log/vncserver.$1.log" 2>&1 &
+		  -repeat -clear_all -skip_lockkeys -auth /home/$2/.Xauthority" "$2" \
+		9>&- >>"/var/log/vncserver.$1.log" 2>&1 &
 	sleep 5
 	vnc_alive "$1" && glog "x11vnc for :$1 is up"
 }
 
 start_tcpulse() {
 	# $1 = display number, $2 = user
-	as_user "TCPULSE_CLIENT_CA=/etc/vnc-ca/ca.crt /bin/tcpulse /etc/cert.pem 570$1" \
-		>"/var/log/tcpulse.$2.log" 2>&1 &
+	as_user "TCPULSE_CLIENT_CA=/etc/vnc-ca/ca.crt /bin/tcpulse /etc/cert.pem 570$1" "$2" \
+		9>&- >"/var/log/tcpulse.$2.log" 2>&1 &
 }
 
 # The supervision loop. Holds an exclusive lock for its whole lifetime, so a
 # second copy - however it was started - logs and exits instead of racing this
 # one for the rfb port.
 supervise() {
+	# NOTE: every child spawned below closes fd 9 (9>&-). Without that the whole
+	# X session tree - startx, xinit, X, dwm, and every app - inherits this fd
+	# and keeps the lock held for as long as the session lives, so a replacement
+	# supervisor can never acquire it.
 	exec 9>"$LOCKFILE"
 	if ! flock -n 9; then
 		glog "supervisor already running - exiting"
