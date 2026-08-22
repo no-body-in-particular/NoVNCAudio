@@ -19,30 +19,45 @@ Enjoy your VNC server with audio.
 
 https://github.com/novnc/noVNC
 
-## Keeping the session alive
+## Session lifetime, and why there is no supervisor
 
 `.xinitrc` conventionally ends in a loop that waits on the window manager, which
 ties the X server's lifetime to it. If the window manager dies - or anything kills
 the startx/xinit process tree - X shuts down cleanly and takes every application
-and shell in the session with it. Nothing brought it back.
+and shell in the session with it, and **nothing brings it back**. Run
+`rc-service vnc start` to restore it.
 
-`supervise()` in `/etc/init.d/vnc` polls every 5s and restarts X, then x11vnc,
-when `:$DISP` disappears. It logs to `/var/log/vnc-session-guard.log`.
+There used to be a supervisor for exactly that: first a separate
+`/usr/local/bin/vnc-session-guard`, later an inline `supervise()` in
+`/etc/init.d/vnc`, polling every 5s. It was removed, for two reasons:
 
-It used to be a separate `/usr/local/bin/vnc-session-guard`, launched by the init
-script via `start-stop-daemon`. It is inline now so that there is exactly **one**
-launcher. With two, both managed x11vnc, several copies of each ended up running,
-and every loser that could not bind the rfb port died with `BadShmSeg` and was
-restarted by x11vnc's own `-loop` roughly **24 times a minute** - indefinitely,
-costing ~1.8% of a core and writing ~144 MB/day to `/var/log/vncserver.2.log`.
+1. A long-running shell holds the script's function definitions **as they were
+   when it started**. Editing `/etc/init.d/vnc` then changed nothing until that
+   process was restarted, so flag changes silently appeared to be ignored.
+2. Two launchers both managing x11vnc meant several copies could run. Only one
+   can bind the rfb port; the losers died with `BadShmSeg` and were restarted by
+   x11vnc's own `-loop` roughly **24 times a minute** - indefinitely, costing
+   ~1.8% of a core and writing ~144 MB/day to `/var/log/vncserver.2.log`.
 
-`supervise()` holds an exclusive `flock` on `/run/vnc-supervise.lock` for its whole
-lifetime, so however many times the service is started - or a supervisor is launched
-by hand - only one can run. The rest log "supervisor already running" and exit.
+Everything now lives in `/etc/init.d/vnc` and runs only when invoked, so it is
+always read fresh from disk.
 
-Note that `stop()` kills only this display's X, x11vnc and supervisor. It previously
-ran `pkill -U $usrid`, which killed every process the user owned - including
-unrelated login shells - on any `restart`.
+`start()` is idempotent - it starts only what is not already running - so it is
+safe against a live session. `restart_vnc` restarts **only x11vnc**, leaving X
+and every application running; that is the way to apply changes to its flags:
+
+```
+rc-service vnc restart_vnc
+```
+
+Note that a full `stop()` kills only this display's X, x11vnc and tcpulse. It
+previously ran `pkill -U $usrid`, which killed every process the user owned -
+including unrelated login shells - on any `restart`.
+
+Beware x11vnc's `-loop`: it re-execs itself with its **original** argv, so
+killing one process just resurrects the old command line. To change flags you
+must take the whole tree down, `-loop` parent included - which is what
+`restart_vnc` does.
 
 ## x11vnc patches (Gentoo overlay)
 
