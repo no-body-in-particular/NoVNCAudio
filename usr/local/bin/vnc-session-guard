@@ -1,0 +1,70 @@
+#!/bin/bash
+# vnc-session-guard - keep the X session on :$DISP and its x11vnc alive.
+#
+# Why this exists: .xinitrc ends in a `while pgrep dwm; sleep 1; done` loop, so
+# the X server's lifetime is tied to the window manager. If dwm dies - or if
+# anything kills the startx/xinit process tree - X shuts down cleanly (exit 0)
+# and takes every application and shell in the session with it. Nothing used to
+# bring it back. This does.
+#
+# Deliberately installed under /usr/local/bin: agent scratchpads live under
+# /tmp/claude-*, and cleanup sweeps that match process cmdlines on substrings
+# like "claude" would otherwise match the launcher path and kill X with it.
+
+DISP="${DISP:-2}"
+XUSER="${XUSER:-admin}"
+RFBPORT="580${DISP}"
+LOG="/var/log/vnc-session-guard.log"
+INTERVAL="${INTERVAL:-5}"
+
+log() { echo "$(date '+%F %T') $*" >>"$LOG"; }
+
+as_user() {
+    if [ "$(id -u)" = "0" ]; then su -s /bin/bash "$XUSER" -c "$1"
+    else bash -c "$1"; fi
+}
+
+x_alive() {
+    [ -S "/tmp/.X11-unix/X${DISP}" ] || return 1
+    ps -eo comm=,args= | awk -v d=":${DISP}" '
+        ($1=="X"||$1=="Xorg") && index($0,d) {found=1}
+        END {exit !found}'
+}
+
+vnc_alive() {
+    ps -eo comm=,args= | awk -v d="-display :${DISP}" '
+        $1=="x11vnc" && index($0,d) {found=1}
+        END {exit !found}'
+}
+
+start_x() {
+    log "X on :${DISP} is down - starting"
+    rm -f "/tmp/.X${DISP}-lock" 2>/dev/null
+    as_user "cd ~ && exec startx -- :${DISP}" >>"/var/log/x11.${XUSER}.log" 2>&1 &
+    for _ in $(seq 1 30); do sleep 1; x_alive && { log "X on :${DISP} is up"; return 0; }; done
+    log "X on :${DISP} failed to come up within 30s"
+    return 1
+}
+
+start_vnc() {
+    log "x11vnc for :${DISP} is down - starting on port ${RFBPORT}"
+    as_user "source /etc/profile; /bin/shm_clear -y >/dev/null 2>&1; \
+        export UNIXPW_DISABLE_SSL=1 UNIXPW_DISABLE_LOCALHOST=1 FD_GEOM=1920x1080; \
+        cd ~ && exec x11vnc -threads -forever -alwaysshared -nomodtweak -noxkb \
+          -rfbport ${RFBPORT} -nopw -loop -display :${DISP} \
+          -ssl /etc/cert.pem -sslverify /etc/vnc-ca/ca.crt \
+          -repeat -clear_all -skip_lockkeys -auth /home/${XUSER}/.Xauthority" \
+        >>"/var/log/vncserver.${DISP}.log" 2>&1 &
+    sleep 5
+    vnc_alive && log "x11vnc for :${DISP} is up"
+}
+
+log "guard started (display :${DISP}, user ${XUSER}, interval ${INTERVAL}s)"
+while true; do
+    if ! x_alive; then
+        start_x && start_vnc
+    elif ! vnc_alive; then
+        start_vnc
+    fi
+    sleep "$INTERVAL"
+done

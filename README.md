@@ -13,10 +13,32 @@ gst-launch-1.0 -q -v alsasrc ! audio/x-raw, channels=2, rate=24000 !  voaacenc  
 Copy files in /var/www to your webserver.
 Run "make && make install" in the login and sound folders.
 Copy init script to /etc/init.d/ and the Xorg config somewhere, edit init script with UserIDs as needed.
+Copy `usr/local/bin/vnc-session-guard` to /usr/local/bin/ and `chmod 755` it - the init script starts it.
 Add file containing the vnc password in `~/.vnc/vnc_password` and chmod to 600
 Enjoy your VNC server with audio.
 
 https://github.com/novnc/noVNC
+
+## Keeping the session alive
+
+`.xinitrc` conventionally ends in a loop that waits on the window manager, which
+ties the X server's lifetime to it. If the window manager dies - or anything kills
+the startx/xinit process tree - X shuts down cleanly and takes every application
+and shell in the session with it. Nothing brought it back.
+
+`vnc-session-guard` polls every 5s and restarts X, then x11vnc, when `:$DISP`
+disappears. The init script launches it via `start-stop-daemon` with a pidfile.
+It logs to `/var/log/vnc-session-guard.log`.
+
+It installs to /usr/local/bin deliberately. Automated tooling that cleans up after
+itself by matching process cmdlines on substrings will match a launcher living in a
+scratch directory and kill the X tree with it; keeping the supervisor on a stable
+path outside those directories avoids that.
+
+Note that `stop()` kills only this display's X, x11vnc and guard. It previously ran
+`pkill -U $usrid`, which killed every process the user owned - including unrelated
+login shells - on any `restart`.
+
 
 It works something like this:
 ```mermaid

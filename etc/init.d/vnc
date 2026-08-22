@@ -16,7 +16,7 @@ runx(){
             usrname=$( id -u -n $usrid )
             usrdisp=${user##*:}
             su -s /bin/bash ${usrname} -c "/bin/shm_clear -y"
-            su -s /bin/bash ${usrname} -c "source /etc/profile && export UNIXPW_DISABLE_SSL=1 && export UNIXPW_DISABLE_LOCALHOST=1 && cd ~$usrname && export FD_GEOM=1920x1080 && x11vnc -threads -forever -nevershared -nomodtweak -noxkb  -rfbport 580${usrdisp} -nopw -loop -display \":$usrdisp\" -ssl /etc/cert.pem -sslverify /etc/vnc-ca/ca.crt -repeat -clear_all -skip_lockkeys -auth /home/$usrname/.Xauthority " >/var/log/vncserver.${usrdisp}.log 2>&1 &
+            su -s /bin/bash ${usrname} -c "source /etc/profile && export UNIXPW_DISABLE_SSL=1 && export UNIXPW_DISABLE_LOCALHOST=1 && cd ~$usrname && export FD_GEOM=1920x1080 && x11vnc -threads -forever -alwaysshared -nomodtweak -noxkb  -rfbport 580${usrdisp} -nopw -loop -display \":$usrdisp\" -ssl /etc/cert.pem -sslverify /etc/vnc-ca/ca.crt -repeat -clear_all -skip_lockkeys -auth /home/$usrname/.Xauthority " >/var/log/vncserver.${usrdisp}.log 2>&1 &
         done
         sleep 72000
     done
@@ -29,11 +29,23 @@ start() {
 		usrid=${user%%:*}
                 usrname=$( id -u -n $usrid )
 		usrdisp=${user##*:}
-                su -s "/bin/bash" $usrname -c "startx -- :$usrdisp" > /var/log/x11.$usrname.log 2>&1 &
+                # X and x11vnc are started and kept alive by vnc-session-guard
+                # (see below). Starting startx here too would race with it.
                 su -s "/bin/bash" $usrname -c "TCPULSE_CLIENT_CA=/etc/vnc-ca/ca.crt /bin/tcpulse /etc/cert.pem 570${usrdisp}" > /var/log/tcpulse.$usrname.log 2>&1 &
 	done
 
-        runx &
+        # Supervise X + x11vnc: .xinitrc ties the X server lifetime to dwm, so a
+        # dead window manager - or anything that kills the startx tree - takes the
+        # whole session down. The guard notices within 5s and brings it back.
+        for user in "$DISPLAYS"; do
+                usrid=${user%%:*}
+                usrname=$( id -u -n $usrid )
+                usrdisp=${user##*:}
+                DISP="$usrdisp" XUSER="$usrname" \
+                    start-stop-daemon --start --background \
+                    --make-pidfile --pidfile /run/vnc-session-guard.$usrdisp.pid \
+                    --exec /usr/local/bin/vnc-session-guard
+        done
 	eend $?
 }
 
@@ -45,7 +57,14 @@ stop() {
 	for user in $DISPLAYS; do
                 usrid=${user%%:*}
                 usrdisp=${user##*:}
-                pkill -U $usrid
+                # Do not pkill -U $usrid: that kills every process the user owns,
+                # including unrelated login shells. Stop only this display's stack.
+                start-stop-daemon --stop --quiet --oknodo \
+                    --pidfile /run/vnc-session-guard.$usrdisp.pid 2>/dev/null
+                rm -f /run/vnc-session-guard.$usrdisp.pid 2>/dev/null
+                pkill -U $usrid -f "x11vnc .*-display :$usrdisp"
+                pkill -U $usrid -f "^xinit .*:$usrdisp"
+                pkill -U $usrid -f "^/usr/bin/X .*:$usrdisp"
                 rm -rf /tmp/.X$usrdisp-lock 2>/dev/null
  	done
 
