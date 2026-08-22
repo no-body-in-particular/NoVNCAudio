@@ -158,39 +158,46 @@
          // Loading the origin in a frame first is a navigation, so the choice
          // is made and cached, and the WebSocket then reuses it.
          (function primeThenStart() {
-            const frame = document.getElementById('certPrimeVnc');
-            let started = false;
-            // Compile the wasm zlib before connecting. The decoders build their
-            // Inflate objects inside the RFB constructor, which runs in
-            // vnc.start(), and that constructor is synchronous - so the module
-            // has to be ready by then or every stream quietly uses pako. The
-            // dynamic import resolves to the same module instance the decoders
-            // import statically, so setting it up here is enough.
-            // .catch/.finally: a missing or broken module must never stop the
-            // session starting - inflator.js falls back to pako on its own.
-            const go = () => {
-               if (started) { return; }
-               started = true;
-               import('./inflator.js')
-                  .then(m => m.initInflateWasm('./zinflate.wasm'))
-                  .catch(() => {})
-                  .finally(() => vnc.start());
-            };
-            // x11vnc is not a web server, so the request itself fails after the
-            // handshake - fine, the handshake was the point. Either outcome
-            // means the certificate decision has been made.
-            frame.addEventListener('load', go);
-            frame.addEventListener('error', go);
-            // Never let a hung or slow prime keep the session from starting.
-            setTimeout(go, 8000);
-            frame.src = 'https://' + window.location.hostname + ':5802/';
+            const host = window.location.hostname;
+            const vncFrame = document.getElementById('certPrimeVnc');
+            const audioFrame = document.getElementById('certPrime');
+
+            // Navigate a hidden frame to an origin and resolve once the browser
+            // has made its certificate decision - either outcome will do, since
+            // neither x11vnc nor tcpulse is a web server and the request itself
+            // is expected to fail after the handshake.
+            const settle = (frame, url) => new Promise((resolve) => {
+               let done = false;
+               const go = () => { if (!done) { done = true; resolve(); } };
+               frame.addEventListener('load', go);
+               frame.addEventListener('error', go);
+               setTimeout(go, 8000);   // never let a hung prime block the session
+               frame.src = url;
+            });
+
+            // These MUST run one after another, not together. A browser offers
+            // one client-certificate picker at a time, so two simultaneous
+            // navigations to different ports race and the loser is left with no
+            // decision; its socket then dies in the TLS handshake, which tcpulse
+            // logs as "Failed to accept SSL connection / Connection closed
+            // during handshake". Priming :5702 alone used to work for exactly
+            // that reason - it had the picker to itself until :5802 was added.
+            settle(vncFrame, 'https://' + host + ':5802/')
+               .then(() => settle(audioFrame, 'https://' + host + ':5702/'))
+               // Compile the wasm zlib before connecting: the decoders build
+               // their Inflate objects inside the synchronous RFB constructor,
+               // so the module has to be ready by then or pako is used.
+               .then(() => import('./inflator.js')
+                             .then(m => m.initInflateWasm('./zinflate.wasm')))
+               .catch(() => {})        // nothing here may stop the session
+               .finally(() => vnc.start());
          })();
 
          document.getElementById('quality').onchange = x =>  vnc.setQuality(x.srcElement.value);
          document.getElementById('compression').onchange = x =>  vnc.setCompression(x.srcElement.value);
          document.getElementById('fullscreen').onclick = x => {vnc.toggleFullscreen();}
-         // Prime the audio origin's certificate before any audio connection is made.
-         document.getElementById('certPrime').src = 'https://' + window.location.hostname + ':5702/';
+         // (the audio origin is primed in primeThenStart() above, in sequence
+         // with the session origin - see the note there about the picker race)
 
          const filesUrl = 'https://' + window.location.hostname + ':8443/';
          const overlay  = document.getElementById('filesOverlay');
