@@ -257,11 +257,9 @@ export default class VNC {
 
         // Set parameters that can be changed on an active connection
         this.rfb.viewOnly = this.readQueryFlag('view_only', false);
-        // Scaling off by default: the framebuffer is a fixed 1920x1080, so
-        // fitting it to the window resamples every frame and, on a HiDPI
-        // display, never lines up with device pixels - permanently soft. Off,
-        // pixels map 1:1 and the browser does no resampling at all.
-        // Re-enable per session with ?scale=true.
+        // Scaling off: the framebuffer is drawn at its native size, so pixels
+        // map 1:1, the browser resamples nothing and the picture stays sharp.
+        // ?scale=true fits it to the window instead.
         this.rfb.scaleViewport = this.readQueryFlag('scale', false);
 
         // Apply the image settings at connect. They were only ever set from the slider's onchange,
@@ -272,13 +270,17 @@ export default class VNC {
         this.rfb.qualityLevel = parseInt(this.readQueryVariable('quality', 3), 10);
         this.rfb.compressionLevel = parseInt(this.readQueryVariable('compression', 6), 10);
 
-        // Clipping must follow scaling, not be chosen independently. #screen is
-        // overflow:hidden, so an unscaled 1920x1080 canvas in a smaller window
-        // would have its right and bottom edges cut off with no scrollbars and
-        // no way to reach them. clipViewport gives a draggable viewport
-        // instead, which is what makes scaling-off usable. If scaling is turned
-        // back on the canvas always fits, so clipping is not wanted - hence the
-        // default tracks scaleViewport rather than being a fixed value.
+        // Clipping tracks scaling rather than being a fixed value. With
+        // scaling off - the default - this is on: noVNC sizes the canvas to the
+        // window and paints a sub-region of the framebuffer into it, which you
+        // drag to reach the rest, keeping the whole desktop reachable at 1:1
+        // with no scrollbars and no resampling. With ?scale=true the canvas
+        // always fits, so clipping would be pointless and this turns itself off.
+        //
+        // While clipping is on the canvas exactly fills #screen, so the centring
+        // rule there has nothing to position; the viewport starts at the
+        // framebuffer's top left. ?clip=false gives a real-size canvas that
+        // #screen will centre instead.
         this.rfb.clipViewport = this.readQueryFlag('clip', !this.rfb.scaleViewport);
     }
 

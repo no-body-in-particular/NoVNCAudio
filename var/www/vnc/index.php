@@ -19,7 +19,20 @@
          }
          #screen {
             flex: 1; /* fill remaining space */
-            overflow: hidden;
+            /* Centre the desktop without scaling it. This only does anything
+               when clipViewport is off (?clip=false): with clipping on, which
+               is the default, noVNC stretches the canvas to exactly fill this
+               box and there is nothing left to position.
+               `safe centre` centres it while there is room and falls back to
+               top-left once there is not, so an oversized desktop stays
+               reachable by scrolling instead of having its top and left edges
+               centred off screen where nothing can get at them. overflow:auto
+               rather than hidden for the same reason - the alternative is
+               losing the edges outright. */
+            overflow: auto;
+            display: flex;
+            align-items: safe center;
+            justify-content: safe center;
          }
          #menu {
             position: fixed;
