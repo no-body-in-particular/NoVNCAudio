@@ -383,7 +383,6 @@ input[type=range]{width:100%;accent-color:var(--sel)}
 .time{color:var(--dim);font-size:12px;font-variant-numeric:tabular-nums;width:42px;text-align:center}
 .vol{width:96px;flex:none;display:flex;align-items:center;gap:6px}
 @media(max-width:760px){
-  .side{display:none}
   .vol{display:none}
   .player .art{width:38px;height:38px;font-size:13px}
   .prow{gap:8px}
@@ -394,6 +393,17 @@ input[type=range]{width:100%;accent-color:var(--sel)}
   #ytUrl{width:100%;min-width:0}
   #ytForm{flex:1 1 100%}
 }
+
+/* The sidebar used to disappear entirely below 760px, taking the only way to
+   jump between folders with it - and 760px is most phone browsers and any
+   half-width desktop window. It narrows in steps instead, and only gives up
+   below 380px, where there is genuinely no room for both it and the track
+   list. */
+@media(max-width:760px){.side{width:160px}}
+@media(max-width:560px){.side{width:120px;font-size:12px}
+                        .side a{padding:6px 8px}
+                        .side h2{padding:0 8px}}
+@media(max-width:380px){.side{display:none}}
 </style></head><body>
 
 <div class="toolbar">
