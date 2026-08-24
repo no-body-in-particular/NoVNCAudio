@@ -154,17 +154,24 @@ if (isset($_GET['zip'])) {
     header('X-Content-Type-Options: nosniff');
     header('Cache-Control: private, no-store');
 
-    // -1 is the fastest compression rather than the default 6. A home folder is
-    // mostly media that is already compressed, where the higher levels spend
-    // CPU to save almost nothing and slow the download down.
+    // -1 is the fastest compression rather than the default 6, and -n stores
+    // the formats that are already compressed rather than deflating them
+    // again. A music or photo folder is almost entirely those, and deflate
+    // spends real time to save a fraction of a percent on them - time that
+    // counts here, because the archive is built while the client waits and the
+    // request has a hard ceiling.
     //
     // -y stores symlinks as symlinks instead of following them. Without it a
     // link pointing outside the share is silently copied into the archive,
     // which both leaks whatever it points at and can recurse. This home folder
     // has such links - .bash_history is one, pointing at /dev/null.
+    $stored = '.mp3:.m4a:.aac:.ogg:.oga:.opus:.flac:.wma:.mp4:.m4v:.mkv:.avi:.mov'
+            . ':.webm:.wmv:.jpg:.jpeg:.png:.gif:.webp:.heic:.avif:.tif:.tiff'
+            . ':.zip:.gz:.bz2:.xz:.zst:.7z:.rar:.jar:.apk:.iso:.pdf:.docx:.xlsx:.pptx';
     $cmd = sprintf(
-        'cd %s && exec zip -r -1 -q -y - %s 2>/dev/null',
+        'cd %s && exec /usr/bin/zip -r -1 -q -y -n %s - %s 2>/dev/null',
         escapeshellarg(dirname($dir)),
+        escapeshellarg($stored),
         escapeshellarg(basename($dir))
     );
 
