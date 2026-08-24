@@ -129,23 +129,27 @@ if (isset($_GET['f'])) {
 }
 
 
-// ---- download a whole folder as a zip ---------------------------------------
-// Built to a temporary file and then sent, rather than piped straight from zip
-// to the client. The streaming version worked and produced a byte-identical
-// archive, and it was the first thing tried here, on the reasoning that
-// staging wastes disk and delays the first byte. That reasoning was wrong about
-// which cost matters. Without a Content-Length the browser can show no size, no
-// percentage and no estimate, so a 2.5GB folder looks exactly like a stalled
-// download for as long as it runs - and a transfer that dies halfway still
-// leaves a file that appears complete, because nothing ever said how long it
-// should be.
+// ---- download a whole folder, as a zip streamed on the fly -----------------
+// There is no ZipArchive in this PHP build, and it would be the wrong tool
+// anyway: it assembles the archive in a temporary file first, so a large folder
+// would need as much free space again before a single byte reached the client,
+// on a root filesystem that is both small and unjournalled. Info-ZIP writes to
+// stdout with `-`, using data descriptors instead of seeking back to patch
+// sizes, so the archive can be piped straight to the browser and nothing is
+// ever staged on disk.
 //
-// So: pay a wait before the transfer starts, and get a real progress bar and a
-// download that fails visibly when it fails. ZipArchive would have done the
-// same staging from PHP, but this build has no zip extension at all.
+// No Content-Length: the size is not known until the last entry is compressed,
+// so the browser shows no size and no estimate - only bytes climbing. That is
+// a genuine drawback and building to a temporary file first was tried to fix
+// it, which does yield a real length. It cannot be used: the wrapped CGI is
+// killed if it produces no output early on, and a 2.5GB folder needs about
+// twelve seconds of silence to build. hiawatha logged "no output" and dropped
+// the request while zip was still running, leaving the finished archive
+// orphaned in the cache. Sending the first bytes immediately is what keeps the
+// request alive, so streaming is not merely a nicety here.
 //
-// The archive itself is identical either way; Info-ZIP writes correct local
-// headers to a pipe as readily as to a file, with no data descriptors.
+// The UI says so before starting, since a download with no size looks
+// identical to one that has hung.
 if (isset($_GET['zip'])) {
     $dir = resolve((string)$_GET['zip']);
     if ($dir === null || !is_dir($dir) || !is_readable($dir)) { fail(404, 'Not found or not readable'); }
@@ -153,74 +157,44 @@ if (isset($_GET['zip'])) {
     $name = ($dir === ROOT) ? 'home' : basename($dir);
     $safe = str_replace(['"', "\r", "\n"], '', $name);
 
-    // Build the archive first, then send it with a Content-Length.
-    //
-    // Streaming it straight from the pipe worked and produced a byte-identical
-    // archive, but the response then has no length, so the browser shows
-    // neither a size nor an ETA - just bytes ticking up with no end in sight.
-    // On a 2.5GB folder that is indistinguishable from a stall, and a download
-    // cancelled halfway still leaves a file that looks finished, because
-    // nothing told the browser how much to expect. Staging costs a wait before
-    // the transfer starts; it buys a real progress bar and a download that
-    // fails visibly when it fails.
-    $tmpdir = ROOT . '/.cache/share-zip';
-    if (!is_dir($tmpdir)) { @mkdir($tmpdir, 0700, true); @chmod($tmpdir, 0700); }
-
-    // Sweep anything an earlier request left behind - a killed CGI cannot run
-    // its own cleanup.
-    foreach (glob($tmpdir . '/*.zip') ?: [] as $old) {
-        if (filemtime($old) < time() - 3600) { @unlink($old); }
-    }
-
-    $tmp = $tmpdir . '/' . bin2hex(random_bytes(8)) . '.zip';
-    // Remove it however this request ends, including a fatal or a disconnect.
-    register_shutdown_function(function () use ($tmp) { @unlink($tmp); });
-
-    $stored = '.mp3:.m4a:.aac:.ogg:.oga:.opus:.flac:.wma:.mp4:.m4v:.mkv:.avi:.mov'
-            . ':.webm:.wmv:.jpg:.jpeg:.png:.gif:.webp:.heic:.avif:.tif:.tiff'
-            . ':.zip:.gz:.bz2:.xz:.zst:.7z:.rar:.jar:.apk:.iso:.pdf:.docx:.xlsx:.pptx';
+    while (ob_get_level()) { ob_end_clean(); }
+    header('Content-Type: application/zip');
+    header('Content-Disposition: attachment; filename="' . $safe . '.zip"');
+    header('X-Content-Type-Options: nosniff');
+    header('Cache-Control: private, no-store');
 
     // -1 is the fastest compression rather than the default 6, and -n stores
-    // the formats that are already compressed rather than deflating them again.
-    // Measured on a 1.3GB music folder: 43.3s down to 4.6s for 1.9% more bytes.
+    // the formats that are already compressed rather than deflating them
+    // again. A music or photo folder is almost entirely those, and deflate
+    // spends real time to save a fraction of a percent on them - time that
+    // counts here, because the archive is built while the client waits and the
+    // request has a hard ceiling.
     //
     // -y stores symlinks as symlinks instead of following them. Without it a
     // link pointing outside the share is silently copied into the archive,
     // which both leaks whatever it points at and can recurse. This home folder
     // has such links - .bash_history is one, pointing at /dev/null.
+    $stored = '.mp3:.m4a:.aac:.ogg:.oga:.opus:.flac:.wma:.mp4:.m4v:.mkv:.avi:.mov'
+            . ':.webm:.wmv:.jpg:.jpeg:.png:.gif:.webp:.heic:.avif:.tif:.tiff'
+            . ':.zip:.gz:.bz2:.xz:.zst:.7z:.rar:.jar:.apk:.iso:.pdf:.docx:.xlsx:.pptx';
     $cmd = sprintf(
-        'cd %s && exec /usr/bin/zip -r -1 -q -y -n %s %s %s 2>/dev/null',
+        'cd %s && exec /usr/bin/zip -r -1 -q -y -n %s - %s 2>/dev/null',
         escapeshellarg(dirname($dir)),
         escapeshellarg($stored),
-        escapeshellarg($tmp),
         escapeshellarg(basename($dir))
     );
-    @exec($cmd, $out, $rc);
 
-    // zip returns 12 for "nothing to do" (an empty folder) and 18 when some
-    // files could not be opened; in the latter case the archive is still valid
-    // and holds everything it could read, so only a hard failure is refused.
-    if (!is_file($tmp) || filesize($tmp) === 0 || ($rc !== 0 && $rc !== 18)) {
-        @unlink($tmp);
-        fail(500, $rc === 12 ? 'That folder is empty.' : 'Could not build the archive (zip exit ' . (int)$rc . ').');
-    }
-
-    while (ob_get_level()) { ob_end_clean(); }
-    header('Content-Type: application/zip');
-    header('Content-Length: ' . filesize($tmp));
-    header('Content-Disposition: attachment; filename="' . $safe . '.zip"');
-    header('X-Content-Type-Options: nosniff');
-    header('Cache-Control: private, no-store');
-
-    $fh = fopen($tmp, 'rb');
-    while (!feof($fh)) {
-        $buf = fread($fh, 1024 * 1024);
+    $ph = popen($cmd, 'r');
+    if ($ph === false) { fail(500, 'could not start zip'); }
+    while (!feof($ph)) {
+        $buf = fread($ph, 1024 * 1024);
         if ($buf === '' || $buf === false) { break; }
         echo $buf;
         flush();
+        // The client has gone; stop compressing for nobody.
         if (connection_aborted()) { break; }
     }
-    fclose($fh);
+    pclose($ph);
     exit;
 }
 
@@ -839,7 +813,10 @@ function doDownload(){
   const r = selected()[0];
   if (!r) return;
   const ep = r.dataset.kind === 'dir' ? '?zip=' : '?f=';
-  if (r.dataset.kind === 'dir') say('Preparing ' + r.dataset.name + '.zip - the download starts as it compresses');
+  if (r.dataset.kind === 'dir') {
+    say('Zipping ' + r.dataset.name + ' - the browser will show no size or estimate for this, '
+      + 'because the archive is generated as it downloads. Let it run; a large folder takes minutes.');
+  }
   location.href = ep + encodeURIComponent(r.dataset.path);
 }
 
