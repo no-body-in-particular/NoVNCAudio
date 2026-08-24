@@ -129,72 +129,95 @@ if (isset($_GET['f'])) {
 }
 
 
-// ---- download a whole folder, as a zip streamed on the fly -----------------
-// There is no ZipArchive in this PHP build, and it would be the wrong tool
-// anyway: it assembles the archive in a temporary file first, so a large folder
-// would need as much free space again before a single byte reached the client,
-// on a root filesystem that is both small and unjournalled. Info-ZIP writes to
-// stdout with `-`, using data descriptors instead of seeking back to patch
-// sizes, so the archive can be piped straight to the browser and nothing is
-// ever staged on disk.
+// ---- download a whole folder as a zip ---------------------------------------
+// Three steps, because the transfer cannot go through the CGI at all.
 //
-// No Content-Length: the size is not known until the last entry is compressed,
-// so the browser shows no size and no estimate - only bytes climbing. That is
-// a genuine drawback and building to a temporary file first was tried to fix
-// it, which does yield a real length. It cannot be used: the wrapped CGI is
-// killed if it produces no output early on, and a 2.5GB folder needs about
-// twelve seconds of silence to build. hiawatha logged "no output" and dropped
-// the request while zip was still running, leaving the finished archive
-// orphaned in the cache. Sending the first bytes immediately is what keeps the
-// request alive, so streaming is not merely a nicety here.
+// Streaming zip's output straight to the client was the obvious approach and it
+// does produce a correct archive, but every attempt died between 22MB and 29MB
+// of a 2.5GB folder - six times in the access log, HTTP 200 each time, no error
+// logged. Building to a temp file first fixed the length but broke it worse:
+// the wrapped CGI is killed if it stays silent early on, so hiawatha dropped
+// the request after twelve seconds and logged "no output" while zip carried on
+// in the background.
 //
-// The UI says so before starting, since a download with no size looks
-// identical to one that has hung.
-if (isset($_GET['zip'])) {
-    $dir = resolve((string)$_GET['zip']);
-    if ($dir === null || !is_dir($dir) || !is_readable($dir)) { fail(404, 'Not found or not readable'); }
+// So the CGI now only starts the work and reports on it. zip runs detached,
+// writing into _zips/ inside the website root, and the finished archive is
+// fetched as an ordinary static file - served by hiawatha itself, with a
+// Content-Length, a real progress bar, resume support, and no CGI process whose
+// lifetime can cut it short. _zips/ is inside the certificate-protected vhost,
+// so it is no more reachable than the rest of the share.
+const ZIPDIR = __DIR__ . '/_zips';
 
+function zip_sweep(): void {
+    // A job nobody collected, or one whose browser went away mid-build.
+    foreach (glob(ZIPDIR . '/*', GLOB_ONLYDIR) ?: [] as $d) {
+        if (filemtime($d) < time() - 7200) {
+            foreach (glob($d . '/*') ?: [] as $f) { @unlink($f); }
+            @rmdir($d);
+        }
+    }
+}
+
+if (isset($_GET['zipjob'])) {
+    header('Content-Type: application/json');
+    $dir = resolve((string)$_GET['zipjob']);
+    if ($dir === null || !is_dir($dir) || !is_readable($dir)) { echo json_encode(['ok'=>false,'error'=>'not found']); exit; }
+    if (!is_dir(ZIPDIR)) { @mkdir(ZIPDIR, 0755, true); }
+    zip_sweep();
+
+    $id   = bin2hex(random_bytes(8));
     $name = ($dir === ROOT) ? 'home' : basename($dir);
-    $safe = str_replace(['"', "\r", "\n"], '', $name);
+    // Keep the archive in its own directory so the file itself can carry the
+    // folder's name - that is what the browser saves it as, there being no
+    // Content-Disposition on a static file.
+    $safe = preg_replace('/[^\p{L}\p{N} ._-]+/u', '_', $name);
+    if ($safe === '' || $safe === null) { $safe = 'folder'; }
+    $jobdir = ZIPDIR . '/' . $id;
+    if (!@mkdir($jobdir, 0755, true)) { echo json_encode(['ok'=>false,'error'=>'cannot create job']); exit; }
 
-    while (ob_get_level()) { ob_end_clean(); }
-    header('Content-Type: application/zip');
-    header('Content-Disposition: attachment; filename="' . $safe . '.zip"');
-    header('X-Content-Type-Options: nosniff');
-    header('Cache-Control: private, no-store');
+    $out  = $jobdir . '/' . $safe . '.zip';
+    $part = $out . '.part';
 
-    // -1 is the fastest compression rather than the default 6, and -n stores
-    // the formats that are already compressed rather than deflating them
-    // again. A music or photo folder is almost entirely those, and deflate
-    // spends real time to save a fraction of a percent on them - time that
-    // counts here, because the archive is built while the client waits and the
-    // request has a hard ceiling.
-    //
-    // -y stores symlinks as symlinks instead of following them. Without it a
-    // link pointing outside the share is silently copied into the archive,
-    // which both leaks whatever it points at and can recurse. This home folder
-    // has such links - .bash_history is one, pointing at /dev/null.
     $stored = '.mp3:.m4a:.aac:.ogg:.oga:.opus:.flac:.wma:.mp4:.m4v:.mkv:.avi:.mov'
             . ':.webm:.wmv:.jpg:.jpeg:.png:.gif:.webp:.heic:.avif:.tif:.tiff'
             . ':.zip:.gz:.bz2:.xz:.zst:.7z:.rar:.jar:.apk:.iso:.pdf:.docx:.xlsx:.pptx';
-    $cmd = sprintf(
-        'cd %s && exec /usr/bin/zip -r -1 -q -y -n %s - %s 2>/dev/null',
-        escapeshellarg(dirname($dir)),
-        escapeshellarg($stored),
-        escapeshellarg(basename($dir))
-    );
 
-    $ph = popen($cmd, 'r');
-    if ($ph === false) { fail(500, 'could not start zip'); }
-    while (!feof($ph)) {
-        $buf = fread($ph, 1024 * 1024);
-        if ($buf === '' || $buf === false) { break; }
-        echo $buf;
-        flush();
-        // The client has gone; stop compressing for nobody.
-        if (connection_aborted()) { break; }
-    }
-    pclose($ph);
+    // -1 is the fastest compression rather than the default 6, and -n stores
+    // what is already compressed instead of deflating it again: 43.3s -> 4.6s
+    // on a 1.3GB music folder, for 1.9% more bytes. -y keeps symlinks as
+    // symlinks rather than copying whatever they point at into the archive.
+    //
+    // Written to .part and renamed on success, so the presence of the final
+    // name is itself the "finished" signal and a half-built archive can never
+    // be downloaded. Detached with setsid so it outlives this request.
+    $cmd = sprintf(
+        'cd %s && setsid sh -c %s >/dev/null 2>&1 &',
+        escapeshellarg(dirname($dir)),
+        escapeshellarg(sprintf(
+            '/usr/bin/zip -r -1 -q -y -n %s %s %s && mv %s %s && chmod 644 %s',
+            escapeshellarg($stored), escapeshellarg($part), escapeshellarg(basename($dir)),
+            escapeshellarg($part), escapeshellarg($out), escapeshellarg($out)
+        ))
+    );
+    @exec($cmd);
+
+    echo json_encode(['ok'=>true, 'id'=>$id, 'name'=>$safe . '.zip',
+                      'url'=>'_zips/' . $id . '/' . rawurlencode($safe . '.zip')]);
+    exit;
+}
+
+if (isset($_GET['zipstatus'])) {
+    header('Content-Type: application/json');
+    $id = preg_replace('/[^a-f0-9]/', '', (string)$_GET['zipstatus']);
+    $jobdir = ZIPDIR . '/' . $id;
+    if ($id === '' || !is_dir($jobdir)) { echo json_encode(['ok'=>false,'error'=>'unknown job']); exit; }
+    $done = glob($jobdir . '/*.zip') ?: [];
+    $part = glob($jobdir . '/*.zip.part') ?: [];
+    if ($done) { echo json_encode(['ok'=>true,'done'=>true,'bytes'=>filesize($done[0])]); exit; }
+    if ($part) { clearstatcache(); echo json_encode(['ok'=>true,'done'=>false,'bytes'=>filesize($part[0])]); exit; }
+    // Neither: zip has not created the file yet, or it died before doing so.
+    echo json_encode(['ok'=>true,'done'=>false,'bytes'=>0,
+                      'stalled'=>(filemtime($jobdir) < time() - 60)]);
     exit;
 }
 
@@ -805,19 +828,41 @@ lb.addEventListener('click', e => { if (e.target === lb || e.target.classList.co
 document.getElementById('lb-prev').onclick = () => { lbIndex = (lbIndex - 1 + previewable.length) % previewable.length; showLb(); };
 document.getElementById('lb-next').onclick = () => { lbIndex = (lbIndex + 1) % previewable.length; showLb(); };
 
-/* Download the selection: a file directly, a folder as a zip the server
-   streams as it compresses. Assigning to location rather than fetching keeps
-   the browser's own download UI, which matters here because neither response
-   carries a Content-Length and a hand-rolled progress bar could not show one. */
-function doDownload(){
+/* Download the selection. A file goes straight through ?f=. A folder is zipped
+   by a detached job and then fetched as a static file from _zips/, which is
+   what makes it survive: the archive does not travel through a CGI process, so
+   nothing can cut it off partway, and the browser gets a Content-Length and a
+   real progress bar. Progress while it builds is reported here instead. */
+const mb = n => (n / 1048576).toFixed(0) + ' MB';
+
+async function doDownload(){
   const r = selected()[0];
   if (!r) return;
-  const ep = r.dataset.kind === 'dir' ? '?zip=' : '?f=';
-  if (r.dataset.kind === 'dir') {
-    say('Zipping ' + r.dataset.name + ' - the browser will show no size or estimate for this, '
-      + 'because the archive is generated as it downloads. Let it run; a large folder takes minutes.');
-  }
-  location.href = ep + encodeURIComponent(r.dataset.path);
+  if (r.dataset.kind !== 'dir') { location.href = '?f=' + encodeURIComponent(r.dataset.path); return; }
+
+  say('Preparing ' + r.dataset.name + '…');
+  const job = await fetch('?zipjob=' + encodeURIComponent(r.dataset.path))
+                    .then(x => x.json()).catch(() => null);
+  if (!job || !job.ok) { say('Could not start: ' + ((job && job.error) || 'unknown error')); return; }
+
+  let quiet = 0;
+  const tick = setInterval(async () => {
+    const st = await fetch('?zipstatus=' + encodeURIComponent(job.id))
+                     .then(x => x.json()).catch(() => null);
+    if (!st || !st.ok) { return; }
+    if (st.done) {
+      clearInterval(tick);
+      say('Ready (' + mb(st.bytes) + ') - downloading ' + job.name);
+      location.href = job.url;
+      return;
+    }
+    if (st.stalled && st.bytes === 0 && ++quiet > 3) {
+      clearInterval(tick);
+      say('The archive did not start building - check the server log.');
+      return;
+    }
+    say('Zipping ' + r.dataset.name + '… ' + mb(st.bytes) + ' so far');
+  }, 1000);
 }
 
 /* ---------- context menu */
