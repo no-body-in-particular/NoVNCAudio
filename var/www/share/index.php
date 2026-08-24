@@ -129,6 +129,60 @@ if (isset($_GET['f'])) {
 }
 
 
+// ---- download a whole folder, as a zip streamed on the fly -----------------
+// There is no ZipArchive in this PHP build, and it would be the wrong tool
+// anyway: it assembles the archive in a temporary file first, so a large folder
+// would need as much free space again before a single byte reached the client,
+// on a root filesystem that is both small and unjournalled. Info-ZIP writes to
+// stdout with `-`, using data descriptors instead of seeking back to patch
+// sizes, so the archive can be piped straight to the browser and nothing is
+// ever staged on disk.
+//
+// No Content-Length: the size is not known until the last entry is compressed.
+// Browsers show an indeterminate progress bar for it, which is the honest
+// answer.
+if (isset($_GET['zip'])) {
+    $dir = resolve((string)$_GET['zip']);
+    if ($dir === null || !is_dir($dir) || !is_readable($dir)) { fail(404, 'Not found or not readable'); }
+
+    $name = ($dir === ROOT) ? 'home' : basename($dir);
+    $safe = str_replace(['"', "\r", "\n"], '', $name);
+
+    while (ob_get_level()) { ob_end_clean(); }
+    header('Content-Type: application/zip');
+    header('Content-Disposition: attachment; filename="' . $safe . '.zip"');
+    header('X-Content-Type-Options: nosniff');
+    header('Cache-Control: private, no-store');
+
+    // -1 is the fastest compression rather than the default 6. A home folder is
+    // mostly media that is already compressed, where the higher levels spend
+    // CPU to save almost nothing and slow the download down.
+    //
+    // -y stores symlinks as symlinks instead of following them. Without it a
+    // link pointing outside the share is silently copied into the archive,
+    // which both leaks whatever it points at and can recurse. This home folder
+    // has such links - .bash_history is one, pointing at /dev/null.
+    $cmd = sprintf(
+        'cd %s && exec zip -r -1 -q -y - %s 2>/dev/null',
+        escapeshellarg(dirname($dir)),
+        escapeshellarg(basename($dir))
+    );
+
+    $ph = popen($cmd, 'r');
+    if ($ph === false) { fail(500, 'could not start zip'); }
+    while (!feof($ph)) {
+        $buf = fread($ph, 1024 * 1024);
+        if ($buf === '' || $buf === false) { break; }
+        echo $buf;
+        flush();
+        // The client has gone; stop compressing for nobody.
+        if (connection_aborted()) { break; }
+    }
+    pclose($ph);
+    exit;
+}
+
+
 function mime_of(string $name): string {
     static $m = [
         'png'=>'image/png','jpg'=>'image/jpeg','jpeg'=>'image/jpeg','gif'=>'image/gif',
@@ -735,13 +789,29 @@ lb.addEventListener('click', e => { if (e.target === lb || e.target.classList.co
 document.getElementById('lb-prev').onclick = () => { lbIndex = (lbIndex - 1 + previewable.length) % previewable.length; showLb(); };
 document.getElementById('lb-next').onclick = () => { lbIndex = (lbIndex + 1) % previewable.length; showLb(); };
 
+/* Download the selection: a file directly, a folder as a zip the server
+   streams as it compresses. Assigning to location rather than fetching keeps
+   the browser's own download UI, which matters here because neither response
+   carries a Content-Length and a hand-rolled progress bar could not show one. */
+function doDownload(){
+  const r = selected()[0];
+  if (!r) return;
+  const ep = r.dataset.kind === 'dir' ? '?zip=' : '?f=';
+  if (r.dataset.kind === 'dir') say('Preparing ' + r.dataset.name + '.zip - the download starts as it compresses');
+  location.href = ep + encodeURIComponent(r.dataset.path);
+}
+
 /* ---------- context menu */
 const menu = document.getElementById('menu');
 function showMenu(x, y){
   const n = selected().length, one = n === 1, r = selected()[0];
-  const en = {open: one, download: one && r && r.dataset.kind !== 'dir', cut: n, copy: n,
+  const en = {open: one, download: one, cut: n, copy: n,
               paste: clip().paths.length, rename: one, trash: n, delete: n, newdir: true, upload: true};
   menu.querySelectorAll('button').forEach(b => b.disabled = !en[b.dataset.a]);
+  // A folder downloads as a zip, so say so rather than letting the plain
+  // "Download" label imply a single file is on its way.
+  const dl = menu.querySelector('button[data-a="download"]');
+  if (dl) { dl.textContent = (one && r && r.dataset.kind === 'dir') ? 'Download as zip' : 'Download'; }
   menu.classList.add('on');
   const w = menu.offsetWidth, h = menu.offsetHeight;
   menu.style.left = Math.min(x, innerWidth  - w - 6) + 'px';
@@ -759,7 +829,7 @@ document.addEventListener('contextmenu', e => {
 document.addEventListener('click', hideMenu);
 menu.addEventListener('click', e => {
   const b = e.target.closest('button'); if (!b || b.disabled) return;
-  ({open:()=>open_(selected()[0]), download:()=>location.href='?f='+encodeURIComponent(selected()[0].dataset.path),
+  ({open:()=>open_(selected()[0]), download:doDownload,
     cut:()=>setClip('cut'), copy:()=>setClip('copy'), paste:doPaste, rename:doRename,
     trash:()=>doTrash(false), delete:()=>doTrash(true), newdir:doNewDir, upload:()=>document.getElementById('pick').click()})[b.dataset.a]();
 });
