@@ -158,14 +158,29 @@ function zip_sweep(): void {
     }
 }
 
+function zip_trace(string $m): void {
+    @file_put_contents(ZIPDIR . '/trace.log',
+        date('H:i:s') . ' ' . $m . "\n", FILE_APPEND);
+}
+
 if (isset($_GET['zipjob'])) {
+    zip_trace('--- zipjob start');
     header('Content-Type: application/json');
     $dir = resolve((string)$_GET['zipjob']);
+    zip_trace('resolved: ' . var_export($dir, true));
     if ($dir === null || !is_dir($dir) || !is_readable($dir)) { echo json_encode(['ok'=>false,'error'=>'not found']); exit; }
     if (!is_dir(ZIPDIR)) { @mkdir(ZIPDIR, 0755, true); }
     zip_sweep();
+    zip_trace('swept');
 
-    $id   = bin2hex(random_bytes(8));
+    // The browser supplies the id rather than being told it. exec() does not
+    // return here - the wrapped CGI is killed while still inside it, six
+    // seconds in, every time - so this request cannot be relied on to reply.
+    // It does not need to: the work is already detached and running by then,
+    // and ?zipstatus= finds it by the id the browser already holds. The 500
+    // that hiawatha reports for this request is expected and harmless.
+    $id = preg_replace('/[^a-f0-9]/', '', (string)($_GET['id'] ?? ''));
+    if (strlen($id) !== 16) { echo json_encode(['ok'=>false,'error'=>'bad id']); exit; }
     $name = ($dir === ROOT) ? 'home' : basename($dir);
     // Keep the archive in its own directory so the file itself can carry the
     // folder's name - that is what the browser saves it as, there being no
@@ -174,7 +189,11 @@ if (isset($_GET['zipjob'])) {
     if ($safe === '' || $safe === null) { $safe = 'folder'; }
     $jobdir = ZIPDIR . '/' . $id;
     if (!@mkdir($jobdir, 0755, true)) { echo json_encode(['ok'=>false,'error'=>'cannot create job']); exit; }
+    zip_trace('jobdir made: ' . $jobdir);
 
+    // Written before zip starts: ?zipstatus= needs it to build the download
+    // URL, and this request will not survive to report anything itself.
+    @file_put_contents($jobdir . '/name', $safe . '.zip');
     $out  = $jobdir . '/' . $safe . '.zip';
     $part = $out . '.part';
 
@@ -190,8 +209,15 @@ if (isset($_GET['zipjob'])) {
     // Written to .part and renamed on success, so the presence of the final
     // name is itself the "finished" signal and a half-built archive can never
     // be downloaded. Detached with setsid so it outlives this request.
+    // All three redirections matter, not just stdout. exec() reads the child's
+    // pipe until every writer closes it, so a background job still holding
+    // stdin keeps the call blocked - which is exactly what happened: the trace
+    // reached "about to exec" and stopped, and the CGI was killed six seconds
+    // later still waiting for a 15-second zip. With stdin, stdout and stderr
+    // all detached the call returns immediately and the request finishes in
+    // milliseconds, so no CGI time limit applies to it at all.
     $cmd = sprintf(
-        'cd %s && setsid sh -c %s >/dev/null 2>&1 &',
+        'cd %s && setsid sh -c %s </dev/null >/dev/null 2>&1 &',
         escapeshellarg(dirname($dir)),
         escapeshellarg(sprintf(
             '/usr/bin/zip -r -1 -q -y -n %s %s %s && mv %s %s && chmod 644 %s',
@@ -199,8 +225,12 @@ if (isset($_GET['zipjob'])) {
             escapeshellarg($part), escapeshellarg($out), escapeshellarg($out)
         ))
     );
-    @exec($cmd);
+    zip_trace('about to exec: ' . substr($cmd, 0, 200));
+    $rc = null; $out = [];
+    @exec($cmd, $out, $rc);
+    zip_trace('exec returned rc=' . var_export($rc, true) . ' out=' . count($out));
 
+    zip_trace('sending json');
     echo json_encode(['ok'=>true, 'id'=>$id, 'name'=>$safe . '.zip',
                       'url'=>'_zips/' . $id . '/' . rawurlencode($safe . '.zip')]);
     exit;
@@ -211,9 +241,11 @@ if (isset($_GET['zipstatus'])) {
     $id = preg_replace('/[^a-f0-9]/', '', (string)$_GET['zipstatus']);
     $jobdir = ZIPDIR . '/' . $id;
     if ($id === '' || !is_dir($jobdir)) { echo json_encode(['ok'=>false,'error'=>'unknown job']); exit; }
+    $name = trim((string)@file_get_contents($jobdir . '/name'));
+    $url  = $name === '' ? null : '_zips/' . $id . '/' . rawurlencode($name);
     $done = glob($jobdir . '/*.zip') ?: [];
     $part = glob($jobdir . '/*.zip.part') ?: [];
-    if ($done) { echo json_encode(['ok'=>true,'done'=>true,'bytes'=>filesize($done[0])]); exit; }
+    if ($done) { echo json_encode(['ok'=>true,'done'=>true,'bytes'=>filesize($done[0]),'url'=>$url,'name'=>$name]); exit; }
     if ($part) { clearstatcache(); echo json_encode(['ok'=>true,'done'=>false,'bytes'=>filesize($part[0])]); exit; }
     // Neither: zip has not created the file yet, or it died before doing so.
     echo json_encode(['ok'=>true,'done'=>false,'bytes'=>0,
@@ -840,25 +872,28 @@ async function doDownload(){
   if (!r) return;
   if (r.dataset.kind !== 'dir') { location.href = '?f=' + encodeURIComponent(r.dataset.path); return; }
 
-  say('Preparing ' + r.dataset.name + '…');
-  const job = await fetch('?zipjob=' + encodeURIComponent(r.dataset.path))
-                    .then(x => x.json()).catch(() => null);
-  if (!job || !job.ok) { say('Could not start: ' + ((job && job.error) || 'unknown error')); return; }
+  // The id is minted here, not by the server. The request that starts the zip
+  // is killed by the CGI time limit while zip is still running, so it never
+  // answers - but the work is detached and carries on, and polling by an id we
+  // already hold finds it. Its failure is therefore ignored on purpose.
+  const id = [...crypto.getRandomValues(new Uint8Array(8))]
+               .map(b => b.toString(16).padStart(2, '0')).join('');
 
-  let quiet = 0;
+  say('Preparing ' + r.dataset.name + '…');
+  fetch('?zipjob=' + encodeURIComponent(r.dataset.path) + '&id=' + id).catch(() => {});
+
+  let waited = 0;
   const tick = setInterval(async () => {
-    const st = await fetch('?zipstatus=' + encodeURIComponent(job.id))
-                     .then(x => x.json()).catch(() => null);
-    if (!st || !st.ok) { return; }
-    if (st.done) {
-      clearInterval(tick);
-      say('Ready (' + mb(st.bytes) + ') - downloading ' + job.name);
-      location.href = job.url;
+    waited++;
+    const st = await fetch('?zipstatus=' + id).then(x => x.json()).catch(() => null);
+    if (!st || !st.ok) {
+      if (waited > 20) { clearInterval(tick); say('The archive never started - check the server log.'); }
       return;
     }
-    if (st.stalled && st.bytes === 0 && ++quiet > 3) {
+    if (st.done && st.url) {
       clearInterval(tick);
-      say('The archive did not start building - check the server log.');
+      say('Ready (' + mb(st.bytes) + ') - downloading ' + st.name);
+      location.href = st.url;
       return;
     }
     say('Zipping ' + r.dataset.name + '… ' + mb(st.bytes) + ' so far');
