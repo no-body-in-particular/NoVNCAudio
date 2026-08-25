@@ -158,20 +158,12 @@ function zip_sweep(): void {
     }
 }
 
-function zip_trace(string $m): void {
-    @file_put_contents(ZIPDIR . '/trace.log',
-        date('H:i:s') . ' ' . $m . "\n", FILE_APPEND);
-}
-
 if (isset($_GET['zipjob'])) {
-    zip_trace('--- zipjob start');
     header('Content-Type: application/json');
     $dir = resolve((string)$_GET['zipjob']);
-    zip_trace('resolved: ' . var_export($dir, true));
     if ($dir === null || !is_dir($dir) || !is_readable($dir)) { echo json_encode(['ok'=>false,'error'=>'not found']); exit; }
     if (!is_dir(ZIPDIR)) { @mkdir(ZIPDIR, 0755, true); }
     zip_sweep();
-    zip_trace('swept');
 
     // The browser supplies the id rather than being told it. exec() does not
     // return here - the wrapped CGI is killed while still inside it, six
@@ -189,7 +181,6 @@ if (isset($_GET['zipjob'])) {
     if ($safe === '' || $safe === null) { $safe = 'folder'; }
     $jobdir = ZIPDIR . '/' . $id;
     if (!@mkdir($jobdir, 0755, true)) { echo json_encode(['ok'=>false,'error'=>'cannot create job']); exit; }
-    zip_trace('jobdir made: ' . $jobdir);
 
     // Written before zip starts: ?zipstatus= needs it to build the download
     // URL, and this request will not survive to report anything itself.
@@ -225,12 +216,7 @@ if (isset($_GET['zipjob'])) {
             escapeshellarg($part), escapeshellarg($out), escapeshellarg($out)
         ))
     );
-    zip_trace('about to exec: ' . substr($cmd, 0, 200));
-    $rc = null; $out = [];
-    @exec($cmd, $out, $rc);
-    zip_trace('exec returned rc=' . var_export($rc, true) . ' out=' . count($out));
-
-    zip_trace('sending json');
+    @exec($cmd);
     echo json_encode(['ok'=>true, 'id'=>$id, 'name'=>$safe . '.zip',
                       'url'=>'_zips/' . $id . '/' . rawurlencode($safe . '.zip')]);
     exit;
@@ -590,6 +576,20 @@ img.thumb{width:32px;height:24px;object-fit:cover;border-radius:2px;flex:none;ba
 .dropover div{background:var(--win);border:1px solid var(--sel);border-radius:6px;padding:12px 20px;
               color:var(--fg);box-shadow:0 8px 26px rgba(0,0,0,.5)}
 tbody tr.droptarget{outline:2px solid var(--sel);outline-offset:-2px;background:rgba(22,160,133,.18)}
+/* Zipping a folder happens before any download starts, and the browser shows
+   nothing at all during it - so without this the UI looks idle for however long
+   the archive takes, which on a 2.5GB folder is long enough to assume it has
+   failed. The status line alone was too easy to miss. */
+#zipbox{position:fixed;left:50%;top:16px;transform:translateX(-50%);z-index:60;display:none;
+        align-items:center;gap:10px;padding:10px 16px;max-width:92vw;
+        background:var(--head);color:var(--fg);border:1px solid var(--line);border-radius:8px;
+        box-shadow:0 10px 30px rgba(0,0,0,.45);font-size:13px}
+#zipbox.on{display:flex}
+#zipbox .spin{flex:none;width:14px;height:14px;border:2px solid var(--line);
+              border-top-color:var(--sel);border-radius:50%;animation:zspin .8s linear infinite}
+#zipbox.done .spin{animation:none;border-color:var(--sel)}
+@keyframes zspin{to{transform:rotate(360deg)}}
+#zipbox .nm{font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:40vw}
 #prog{display:none;align-items:center;gap:8px;flex:1;justify-content:center}
 #prog.on{display:flex}
 #prog progress{width:150px;height:6px}
@@ -698,6 +698,7 @@ tbody tr.droptarget{outline:2px solid var(--sel);outline-offset:-2px;background:
  </div>
 </div>
 
+<div id="zipbox"><span class="spin"></span><span class="nm" id="zipname"></span><span id="zipmsg"></span></div>
 <div class="status">
  <span id="stat"><?= count($dirs) ?> folder<?= count($dirs) === 1 ? '' : 's' ?>, <?= count($files) ?> file<?= count($files) === 1 ? '' : 's' ?></span>
  <span id="prog"><progress id="bar" value="0" max="100"></progress><span id="log"></span></span>
@@ -867,6 +868,17 @@ document.getElementById('lb-next').onclick = () => { lbIndex = (lbIndex + 1) % p
    real progress bar. Progress while it builds is reported here instead. */
 const mb = n => (n / 1048576).toFixed(0) + ' MB';
 
+const zipbox  = document.getElementById('zipbox');
+const zipname = document.getElementById('zipname');
+const zipmsg  = document.getElementById('zipmsg');
+function zipShow(name, msg, done){
+  zipname.textContent = name;
+  zipmsg.textContent  = msg;
+  zipbox.classList.toggle('done', !!done);
+  zipbox.classList.add('on');
+}
+const zipHide = () => zipbox.classList.remove('on');
+
 async function doDownload(){
   const r = selected()[0];
   if (!r) return;
@@ -878,8 +890,10 @@ async function doDownload(){
   // already hold finds it. Its failure is therefore ignored on purpose.
   const id = [...crypto.getRandomValues(new Uint8Array(8))]
                .map(b => b.toString(16).padStart(2, '0')).join('');
+  const name = r.dataset.name;
 
-  say('Preparing ' + r.dataset.name + '…');
+  zipShow(name, ' - preparing the archive…');
+  say('Zipping ' + name + '…');
   fetch('?zipjob=' + encodeURIComponent(r.dataset.path) + '&id=' + id).catch(() => {});
 
   let waited = 0;
@@ -887,16 +901,26 @@ async function doDownload(){
     waited++;
     const st = await fetch('?zipstatus=' + id).then(x => x.json()).catch(() => null);
     if (!st || !st.ok) {
-      if (waited > 20) { clearInterval(tick); say('The archive never started - check the server log.'); }
+      if (waited > 20) {
+        clearInterval(tick);
+        zipShow(name, ' - could not be zipped', true);
+        setTimeout(zipHide, 6000);
+        say('The archive never started - check the server log.');
+      }
       return;
     }
     if (st.done && st.url) {
       clearInterval(tick);
-      say('Ready (' + mb(st.bytes) + ') - downloading ' + st.name);
+      zipShow(name, ' - ready, ' + mb(st.bytes) + ', starting download', true);
+      say('Downloading ' + st.name);
+      setTimeout(zipHide, 4000);
       location.href = st.url;
       return;
     }
-    say('Zipping ' + r.dataset.name + '… ' + mb(st.bytes) + ' so far');
+    // Nothing to show a percentage against - the finished size is not known
+    // until it is finished - so report what exists so far and keep it moving.
+    zipShow(name, ' - zipping, ' + mb(st.bytes) + ' so far…');
+    say('Zipping ' + name + '… ' + mb(st.bytes));
   }, 1000);
 }
 
