@@ -23,6 +23,14 @@
 # Every function below is idempotent: start() only starts what is not already
 # running, so it is safe to re-run against a live session to pick up changes to
 # this file (e.g. to restart just x11vnc after editing its flags).
+#
+# "Already running" is decided by vnc_healthy(), not by the presence of a
+# process. x11vnc can die in ways that leave the process table looking fine -
+# see that function - and an earlier version of this script tested only
+# `pgrep`-style liveness, so a wedged server made both start() and the web
+# restart button report "x11vnc for :2 already running" and skip the one thing
+# that needed restarting. Anything that is running but not healthy is now
+# treated as stale and killed before a replacement is started.
 
 DISPLAYS="1000:2"
 
@@ -35,6 +43,48 @@ as_user() {
 	su -s /bin/bash "$2" -c "$1"
 }
 
+# Everything here writes root-owned logs and needs `ss -p` to see which process
+# owns a socket. Run as a normal user, start_vnc()'s redirection fails with
+# "Permission denied", which aborts the command *before* x11vnc is exec'd while
+# the function itself still succeeds - a silent no-op that reports [ ok ].
+require_root() {
+	[ "$(id -u)" = 0 ] && return 0
+	eerror "vnc: must be run as root (try: sudo rc-service vnc $1)"
+	return 1
+}
+
+# Start time of $1 in clock ticks since boot (/proc/PID/stat field 22).
+# The comm field can contain spaces, so cut everything up to its closing paren
+# and count from there instead of trusting a fixed column.
+proc_start() {
+	sed 's/.*) //' "/proc/$1/stat" 2>/dev/null | awk '{print $20}'
+}
+
+# PID of the X server on display $1, if any.
+x_pid() {
+	local pid
+	pid=$(ps -eo pid=,comm=,args= | awk -v d=":$1" '
+		($2=="X"||$2=="Xorg") && index($0,d) {print $1; exit}')
+	[ -n "$pid" ] || return 1
+	printf '%s\n' "$pid"
+}
+
+# PID holding the rfb listening socket for display $1, if any. Needs root.
+port_owner() {
+	local pid
+	pid=$(ss -tlnpH "sport = :580$1" 2>/dev/null |
+		sed -n 's/.*pid=\([0-9]\{1,\}\).*/\1/p' | head -n1)
+	[ -n "$pid" ] || return 1
+	printf '%s\n' "$pid"
+}
+
+# Recv-Q and Send-Q of that listening socket. On a LISTEN socket Recv-Q is the
+# number of completed connections waiting to be accept()ed and Send-Q is the
+# backlog, so Recv-Q == Send-Q means the queue is full.
+port_queue() {
+	ss -tlnH "sport = :580$1" 2>/dev/null | awk '$1=="LISTEN"{print $2" "$3; exit}'
+}
+
 x_alive() {
 	# $1 = display number
 	[ -S "/tmp/.X11-unix/X$1" ] || return 1
@@ -43,11 +93,62 @@ x_alive() {
 		END {exit !found}'
 }
 
-vnc_alive() {
+# Is there any x11vnc process for display $1 at all? This is liveness only -
+# it says nothing about whether the thing is serving anyone. Use it to decide
+# whether there is something to kill, never to decide whether to start.
+vnc_running() {
 	# $1 = display number
 	ps -eo comm=,args= | awk -v d="-display :$1" '
 		$1=="x11vnc" && index($0,d) {found=1}
 		END {exit !found}'
+}
+
+# Is x11vnc for display $1 actually able to serve a client? Three ways it can
+# be running and useless, all seen in practice:
+#
+#   1. Nothing owns the rfb port. A worker that lost the bind race exits, but
+#      -loop respawns it forever against a port another copy holds.
+#   2. The port is owned but the accept queue is pegged full. x11vnc runs with
+#      -threads; when a worker thread dies on heap corruption ("double free or
+#      corruption", signal 6) the process survives wedged in futex_do_wait,
+#      still holding the socket and never calling accept() again. Connections
+#      complete at the TCP level and then hang with no RFB handshake, so the
+#      client sees a spinner rather than a refusal, and ps sees a live x11vnc.
+#   3. The owner predates the running X server. x11vnc cannot outlive its X
+#      server, so a process older than the X on this display is still talking
+#      to a previous one and will never serve this session. This is the normal
+#      state after X is restarted underneath a surviving x11vnc.
+#
+# Note the process checked is the one holding the port - x11vnc's -loop parent
+# spawns the worker that binds, and per-connection -ssl helpers hang off that
+# worker, so all three generations match the same command line and only the
+# socket owner tells you which is the real server.
+vnc_healthy() {
+	local disp=$1 pid xpid q recvq backlog
+
+	pid=$(port_owner "$disp") || return 1
+
+	tr '\0' ' ' < "/proc/$pid/cmdline" 2>/dev/null |
+		grep -q -- "-display :$disp" || return 1
+
+	q=$(port_queue "$disp")
+	recvq=${q%% *}
+	backlog=${q##* }
+	if [ -n "$recvq" ] && [ -n "$backlog" ] && [ "$recvq" -ge "$backlog" ]; then
+		# Re-check before condemning it: a burst of connections can fill the
+		# queue for an instant on a server that is draining it normally. A
+		# wedged one never drains.
+		sleep 1
+		q=$(port_queue "$disp")
+		recvq=${q%% *}
+		backlog=${q##* }
+		[ -n "$recvq" ] && [ -n "$backlog" ] && [ "$recvq" -ge "$backlog" ] && return 1
+	fi
+
+	xpid=$(x_pid "$disp") || return 1
+	[ "$(proc_start "$pid")" -ge "$(proc_start "$xpid")" ] || return 1
+
+	return 0
 }
 
 tcpulse_alive() {
@@ -55,6 +156,48 @@ tcpulse_alive() {
 	ps -eo comm=,args= | awk -v p="570$1" '
 		$1=="tcpulse" && index($0,p) {found=1}
 		END {exit !found}'
+}
+
+# Kill every x11vnc for display $1 owned by uid $2 and wait for the rfb port to
+# come free. Escalates: a wedged x11vnc does not act on SIGTERM, because the
+# signal is only ever handled by a thread that has stopped scheduling, so a
+# plain `pkill; sleep 2; start` leaves the corpse holding the port and the
+# replacement cannot bind. The command line matches the -loop parent, its
+# worker and any -ssl helpers, so one sweep takes the whole tree; killing the
+# parent too is what stops -loop from respawning a worker underneath us.
+kill_vnc() {
+	# $1 = display number, $2 = user id
+	local disp=$1 usrid=$2 n
+
+	vnc_running "$disp" || return 0
+
+	pkill -U "$usrid" -f "x11vnc .*-display :$disp"
+	for n in $(seq 1 10); do
+		vnc_running "$disp" || break
+		sleep 1
+	done
+
+	if vnc_running "$disp"; then
+		ewarn "x11vnc for :$disp ignored SIGTERM, sending SIGKILL"
+		pkill -KILL -U "$usrid" -f "x11vnc .*-display :$disp"
+		for n in $(seq 1 10); do
+			vnc_running "$disp" || break
+			sleep 1
+		done
+	fi
+
+	# The socket can outlive the process by a moment; starting before it is
+	# free just recreates the failed-bind loop described in vnc_healthy.
+	for n in $(seq 1 10); do
+		port_owner "$disp" >/dev/null || break
+		sleep 1
+	done
+
+	if vnc_running "$disp"; then
+		eerror "could not kill x11vnc for :$disp"
+		return 1
+	fi
+	return 0
 }
 
 start_x() {
@@ -105,7 +248,17 @@ start_vnc() {
 		  -ssl /etc/cert.pem -sslverify /etc/vnc-ca/ca.crt \
 		  -repeat -clear_all -skip_lockkeys -auth /home/$2/.Xauthority" "$2" \
 		>>"/var/log/vncserver.$1.log" 2>&1 &
-	sleep 3
+
+	# Confirm it is serving rather than trusting the backgrounded launch: the
+	# failure modes in vnc_healthy() all leave a process behind, and the
+	# redirection above can fail outright without the function noticing.
+	local n
+	for n in $(seq 1 10); do
+		sleep 1
+		vnc_healthy "$1" && return 0
+	done
+	eerror "x11vnc for :$1 did not come up; see /var/log/vncserver.$1.log"
+	return 1
 }
 
 start_tcpulse() {
@@ -116,6 +269,7 @@ start_tcpulse() {
 }
 
 start() {
+	require_root start || return 1
 	ebegin "Starting VNC server"
 
 	for user in $DISPLAYS; do
@@ -133,9 +287,13 @@ start() {
 			start_x "$usrdisp" "$usrname" || continue
 		fi
 
-		if vnc_alive "$usrdisp"; then
+		if vnc_healthy "$usrdisp"; then
 			einfo "x11vnc for :$usrdisp already running"
 		else
+			if vnc_running "$usrdisp"; then
+				ewarn "x11vnc for :$usrdisp is running but not serving :$usrdisp, replacing it"
+				kill_vnc "$usrdisp" "$usrid" || continue
+			fi
 			start_vnc "$usrdisp" "$usrname"
 		fi
 	done
@@ -143,43 +301,79 @@ start() {
 	eend 0
 }
 
+# Every teardown funnels through here - and so does a plain `restart`, which is
+# why the guard lives in stop() and not in restart(). OpenRC implements
+# `restart` inside the openrc-run binary as stop+start; a restart() defined in
+# this file is never called, so a guard placed there is dead code (verified
+# 2026-09-01 against a fully stubbed copy of this script).
+#
+# X on :$disp hosts the desktop and every terminal in it. Practically every
+# restart is asked for because *x11vnc* is broken - the picture froze, the
+# browser will not connect - and never because X is broken. So by default stop
+# takes down only x11vnc and leaves X up; start() is idempotent, so a plain
+# `restart` now behaves exactly like `restart_vnc`. A real teardown has to be
+# asked for by name: `rc-service vnc restart_all`. (VNC_FORCE_FULL_RESTART is
+# that command's internal flag, not a knob you can set from a shell - openrc
+# scrubs the environment before running this script, so exporting it yourself
+# does nothing.)
 stop() {
-	ebegin "Stopping VNC server"
+	require_root stop || return 1
 
 	for user in $DISPLAYS; do
 		usrid=${user%%:*}
 		usrdisp=${user##*:}
+
+		if [ -z "$VNC_FORCE_FULL_RESTART" ] && x_alive "$usrdisp"; then
+			ebegin "Stopping x11vnc for :$usrdisp (leaving X up)"
+			kill_vnc "$usrdisp" "$usrid"
+			eend $?
+			ewarn "X on :$usrdisp is live and was left running."
+			ewarn "Tearing it down would close the desktop and every terminal in it."
+			ewarn "If that is really what you want: rc-service vnc restart_all"
+			continue
+		fi
+
+		ebegin "Stopping VNC server on :$usrdisp"
 		# Do not pkill -U $usrid: that kills every process the user owns,
 		# including unrelated login shells. Stop only this display's stack.
-		pkill -U "$usrid" -f "x11vnc .*-display :$usrdisp"
+		kill_vnc "$usrdisp" "$usrid"
 		pkill -U "$usrid" -f "^xinit .*:$usrdisp"
 		pkill -U "$usrid" -f "^/usr/bin/X .*:$usrdisp"
-		rm -rf "/tmp/.X$usrdisp-lock" 2>/dev/null
+		rm -f "/tmp/.X$usrdisp-lock" 2>/dev/null
+		# Only this display's socket. `rm -rf /tmp/.X11-unix` took out the
+		# whole directory, including sockets belonging to other displays.
+		rm -f "/tmp/.X11-unix/X$usrdisp" 2>/dev/null
+		eend 0
 	done
 
-	rm -rf /tmp/.X11-unix >/dev/null 2>&1
-
-	eend 0
+	return 0
 }
 
 # Restart only x11vnc, leaving X and every application in the session running.
 # This is the safe way to apply changes to start_vnc()'s flags.
 restart_vnc() {
+	require_root restart_vnc || return 1
 	ebegin "Restarting x11vnc only"
 	for user in $DISPLAYS; do
 		usrid=${user%%:*}
 		usrname=$(id -u -n "$usrid")
 		usrdisp=${user##*:}
-		pkill -U "$usrid" -f "x11vnc .*-display :$usrdisp"
-		sleep 2
+		kill_vnc "$usrdisp" "$usrid" || continue
 		start_vnc "$usrdisp" "$usrname"
 	done
 	eend 0
 }
 
-extra_commands="restart_vnc"
-
-restart() {
-	svc_stop
-	svc_start
+# `restart_all` is the old restart: a full svc_stop/svc_start cycle. It tears
+# down X, the desktop and every terminal in the session. Kept as an explicit,
+# separately-named command so that asking for it has to be deliberate.
+restart_all() {
+	require_root restart_all || return 1
+	VNC_FORCE_FULL_RESTART=1 ; export VNC_FORCE_FULL_RESTART
+	stop
+	unset VNC_FORCE_FULL_RESTART
+	start
 }
+
+extra_commands="restart_vnc restart_all"
+
