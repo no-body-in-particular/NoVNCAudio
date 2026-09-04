@@ -264,8 +264,13 @@ start_vnc() {
 start_tcpulse() {
 	# $1 = display number, $2 = user
 	einfo "starting tcpulse on port 570$1"
+	# Append, not truncate. The log is capped in place by /usr/local/sbin/cap-logs,
+	# and a writer that holds this file without O_APPEND keeps its own offset: after
+	# a trim its next write lands at that old offset and leaves a hole, so the file
+	# reads back at its full apparent size even though the space was freed. With >>
+	# every write goes to the current end and a trim is simply honoured.
 	as_user "TCPULSE_CLIENT_CA=/etc/vnc-ca/ca.crt /bin/tcpulse /etc/cert.pem 570$1" "$2" \
-		>"/var/log/tcpulse.$2.log" 2>&1 &
+		>>"/var/log/tcpulse.$2.log" 2>&1 &
 }
 
 start() {

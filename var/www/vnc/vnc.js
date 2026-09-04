@@ -1,13 +1,23 @@
 // RFB holds the API to connect and communicate with a VNC server
 import RFB from './rfb.js';
-import WebAudio from './webaudio.js';
+// webaudio.js is imported with this module's own ?v= query so the two can
+// never be served from cache as a mismatched pair. A computed specifier
+// cannot be a static import, hence the top-level await.
+const WebAudio = (await import('./webaudio.js?v='
+    + (new URL(import.meta.url).searchParams.get('v') || '0'))).default;
+
 
 export default class VNC {
     constructor() {
         this.password = this.readQueryVariable('password');
         this.protocol = (window.location.protocol === 'https:' ? 'wss' : 'ws');
-        this.url = this.protocol + '://'+ window.location.host +':5802/websockify';
-        this.audio = new WebAudio(this.protocol + '://' + window.location.host+':5702/websockify');
+        // hostname, not host: host carries this page's own port, which would be
+        // spliced in ahead of the session/audio port and give an invalid URL on
+        // any deployment that is not served on 443.
+        const peer = this.protocol + '://' + window.location.hostname;
+        this.url = peer + ':5802/websockify';
+        this.audio = new WebAudio(peer + ':5702/websockify', s => this.onAudioState(s));
+        this.audioOff = false;
     }
 
 
@@ -49,9 +59,75 @@ export default class VNC {
     // successfully connected to a server
     connectedToServer() {
         this.stopReconnect();
-        var myself = this;
-        var viewer = document.getElementsByTagName('canvas')[0];
-        viewer.addEventListener('keydown', e => myself.startAudio());
+        this.hookAudioStart();
+    }
+
+    // Audio may only be started from a user gesture, so a first keypress or
+    // click in the session turns it on. This used to attach a keydown listener
+    // to the canvas from connectedToServer(), which had two faults: a reconnect
+    // builds a fresh rfb and so stacked another listener every time, and a
+    // gesture that landed on the container rather than on the canvas itself
+    // never reached it at all. One listener on the document, attached once and
+    // in the capture phase, catches both without stacking.
+    //
+    // Gestures inside the menu are explicitly not a trigger. mousedown fires
+    // before click and this listener is on the capture phase, so a press on the
+    // Audio button itself would otherwise start the stream a moment before the
+    // button's own click handler ran, saw it already playing, and stopped it
+    // again - leaving the button unable to ever turn audio on, and latching
+    // audioOff so the keyboard could not start it either.
+    hookAudioStart() {
+        if (this._audioHooked) { return; }
+        this._audioHooked = true;
+
+        const kick = e => {
+            if (e.target && e.target.closest && e.target.closest('#menu')) { return; }
+            if (this.audioOff) { return; }
+            // A browser that refused the first play() needs another gesture to
+            // try again, not another stream.
+            if (this.audio.wanted) { this.audio.retryPlay(); } else { this.audio.start(); }
+        };
+        document.addEventListener('keydown', kick, true);
+        document.addEventListener('mousedown', kick, true);
+    }
+
+    // Turning audio off with the button keeps it off: the next keystroke must
+    // not silently start it again.
+    toggleAudio() {
+        // A stream that is running but silent because play() was refused should
+        // retry on this press - the press is the gesture it was waiting for -
+        // instead of being torn down.
+        if (this.audio.wanted && this.audio.state === 'blocked') {
+            this.audio.retryPlay();
+            return true;
+        }
+        this.audioOff = this.audio.wanted;
+        return this.audio.toggle();
+    }
+
+    // Reflect the stream's state on the Audio button, if the page has one.
+    // The button is half the panel wide, so the label is a word and the whole
+    // sentence goes in the tooltip.
+    onAudioState(state) {
+        const labels = { off: 'Audio', connecting: 'Audio', playing: 'Audio on',
+                         blocked: 'Blocked', error: 'Failed' };
+        const titles = {
+            off: 'Desktop audio is off - click to start it',
+            connecting: 'Connecting to the desktop audio stream...',
+            playing: 'Desktop audio is playing - click to stop it',
+            blocked: 'The browser refused to play audio; click the button to allow it',
+            error: 'The audio stream failed. If this persists, open https://'
+                   + window.location.hostname + ':5702/ in a tab and choose the '
+                   + 'client certificate - the audio port is its own origin and '
+                   + 'needs its own decision.'
+        };
+        const el = document.getElementById('audioLabel');
+        if (el) { el.textContent = labels[state] || 'Audio'; }
+        const btn = document.getElementById('audio');
+        if (btn) {
+            btn.setAttribute('data-state', state);
+            btn.title = titles[state] || 'Toggle desktop audio';
+        }
     }
 
     static get XK_Shift_L()   { return 0xffe1; }

@@ -1,3 +1,24 @@
+<?php
+// Compress this page if the client will take it.
+//
+// Hiawatha gzips static files - rfb.js goes out as 24 kB of its 120 kB - but it
+// does not touch CGI output, so this page was leaving as 16.8 kB of markup
+// where 5.4 kB does. It is also the first thing that has to arrive before any
+// of the session can begin, so it is the one page where the saving is on the
+// critical path rather than in parallel with everything else.
+//
+// Not set globally in php.ini on purpose: share/index.php and share/music
+// stream downloads and a zip that is built as it is sent, and compressing those
+// a second time would burn CPU to make them slightly larger, and buffering them
+// would undo the streaming. This is the page that benefits, so this is the page
+// that asks.
+//
+// ob_gzhandler reads Accept-Encoding itself and does nothing for a client that
+// did not offer gzip; the plain buffer is the fallback if zlib is unavailable.
+if (!@ob_start('ob_gzhandler')) {
+    ob_start();
+}
+?>
 
 
 <!doctype html>
@@ -36,10 +57,10 @@
          }
          #menu {
             position: fixed;
-            right: -12.75em;
+            right: -14.75em;
             top: 50%;
             box-sizing: border-box;
-            width: 13em;
+            width: 15em;
             margin: 0;
             transform: translateY(-50%);
             padding: 0.9em 1em;
@@ -95,6 +116,29 @@
             transition: background 0.15s ease, transform 0.08s ease, box-shadow 0.15s ease;
          }
          .myButton svg { flex: none }
+         /* Fullscreen and Audio sit two-up. Each takes half the panel, which is
+            narrower than either label wants, so they are set smaller and tighter
+            than the stacked buttons and the label ellipsizes rather than wraps -
+            a wrapped label would make one button taller than its neighbour.
+            min-width:0 is the load-bearing part: a flex item defaults to
+            min-width:auto and will not shrink below its content, so without it
+            the pair overflows the panel instead of sharing it. */
+         #menu .row {
+            display: flex;
+            gap: 0.5em;
+         }
+         #menu .row .myButton {
+            flex: 1 1 0;
+            min-width: 0;
+            padding: 0.55em 0.5em;
+            gap: 0.35em;
+            font-size: 12px;
+         }
+         #menu .row .myButton span {
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+         }
          .myButton:hover {
             background: #6079f4;
             box-shadow: 0 3px 10px hsla(228, 80%, 50%, 0.35);
@@ -152,7 +196,13 @@
       <script nomodule src="browser-es-module-loader.js"></script>
       <!-- actual script modules -->
       <script type="module" crossorigin="anonymous" >
-         import VNC from './vnc.js';
+         // Cache-bust the module graph on every change. A browser that has cached
+         // an older vnc.js/webaudio.js keeps running it across an ordinary reload,
+         // which makes a fixed bug look unfixed - and the old audio client opened a
+         // socket per keystroke, so a stale copy is loud about it. filemtime means
+         // this never needs remembering; webaudio.js carries the same query through
+         // vnc.js's own import.
+         import VNC from './vnc.js?v=<?= filemtime(__DIR__ . '/vnc.js') ?>';
          
          let vnc = new VNC();
 
@@ -209,6 +259,7 @@
          document.getElementById('quality').onchange = x =>  vnc.setQuality(x.srcElement.value);
          document.getElementById('compression').onchange = x =>  vnc.setCompression(x.srcElement.value);
          document.getElementById('fullscreen').onclick = x => {vnc.toggleFullscreen();}
+         document.getElementById('audio').onclick = e => { e.preventDefault(); vnc.toggleAudio(); };
          // (the audio origin is primed in primeThenStart() above, in sequence
          // with the session origin - see the note there about the picker race)
 
@@ -247,10 +298,24 @@
    </head>
    <body>
       <ul id=menu>
-         <li>
+         <!-- Fullscreen and Audio share one row above Files: both are momentary
+              toggles for how the session is presented, as against Files, which
+              opens a panel. See #menu .row for why their labels are set to
+              ellipsize rather than wrap. -->
+         <li class="row">
             <a href="#" class="myButton" id="fullscreen" title="Toggle fullscreen">
                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M8 3H5a2 2 0 0 0-2 2v3M16 3h3a2 2 0 0 1 2 2v3M8 21H5a2 2 0 0 1-2-2v-3M16 21h3a2 2 0 0 0 2-2v-3"/></svg>
                <span>Fullscreen</span>
+            </a>
+            <!-- Audio is a separate stream on its own port; a browser will only
+                 start it from a user gesture, so it needs something to press.
+                 It also starts on the first keypress or click in the session -
+                 this button is how it is turned back off, and how its state
+                 (connecting / on / blocked / failed) becomes visible instead of
+                 failing silently. -->
+            <a href="#" class="myButton" id="audio" data-state="off" title="Toggle desktop audio">
+               <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M11 5 6 9H2v6h4l5 4z"/><path d="M15.5 8.5a5 5 0 0 1 0 7"/><path d="M18.5 5.5a9 9 0 0 1 0 13"/></svg>
+               <span id="audioLabel">Audio</span>
             </a>
          </li>
          <li>

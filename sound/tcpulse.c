@@ -260,44 +260,112 @@ void pipe_audio(int sockfd, SSL * ssl) {
     }
 
     set_nonblock(from_child);
+    // Wait for one of the two ends to have something to say, rather than asking
+    // both of them as fast as the scheduler allows.
+    //
+    // This loop used to be read(); maybe-send; drain_client(); usleep(20) - and
+    // GRACE_TIME is microseconds, so it woke roughly two and a half thousand
+    // times a second. Measured on a live stream that was 14,646 fcntl and 9,764
+    // read calls every two seconds, of which 9,694 returned EAGAIN, to perform
+    // 70 writes: over 99% of the work was asking whether there was any work.
+    // It cost 12% of a core to move 18 kB/s while the encoder feeding it used
+    // 1.3%, and a spin at that rate competes with X and the encoder for the
+    // scheduler as well as for the CPU.
+    //
+    // select() collapses all of that into one blocking call. The timeout is
+    // what paces the keepalive ping, so there is no iteration counter left to
+    // get wrong.
+    time_t last_ping = 0;
 
-    for (size_t iter = 0;; iter++) {
-        bytes = read(from_child, cin_buf, AUDIO_PACKET_SIZE );
+    for (;;) {
+        fd_set  rd;
+        int     ready;
 
-        if (bytes < 0 && errno != EWOULDBLOCK) {
-            fprintf(stderr, "target process ended\n");
-            break;
+        // OpenSSL reads a whole TLS record at a time and buffers what the
+        // caller did not take. Those bytes have already left the socket, so
+        // select() will never report them and we would block for a full timeout
+        // with a pong already in hand. Ask OpenSSL first.
+        if (ssl != NULL && SSL_pending(ssl) > 0) {
+            FD_ZERO(&rd);
+            FD_SET(sockfd, &rd);
+            ready = 1;
+
+        } else {
+            struct timeval tv;
+            tv.tv_sec = 1;
+            tv.tv_usec = 0;
+            FD_ZERO(&rd);
+            FD_SET(from_child, &rd);
+            FD_SET(sockfd, &rd);
+            ready = select(max(from_child, sockfd) + 1, &rd, NULL, NULL, &tv);
+
+            if (ready < 0) {
+                if (errno == EINTR) {
+                    continue;
+                }
+
+                fprintf(stderr, "select failed: %s\n", strerror(errno));
+                break;
+            }
         }
 
-        if (bytes > 0) {
-            len = encode_hybi(cin_buf, bytes, cout_buf, BUFSIZE);
+        if (ready > 0 && FD_ISSET(from_child, &rd)) {
+            bytes = read(from_child, cin_buf, AUDIO_PACKET_SIZE );
 
-            if (len < 0) {
-                fprintf(stderr, "encoding error\n");
+            if (bytes < 0 && errno != EWOULDBLOCK) {
+                fprintf(stderr, "target process ended\n");
                 break;
             }
 
-            int ret = ws_send(sockfd, ssl, cout_buf, len);
-
-            if (ret < len ) {
-                fprintf(stderr, "client closed connection\n");
+            // End of file on the pipe: the encoder has gone. The old loop fell
+            // through this case and spun on it until the client gave up, which
+            // was survivable only because it slept between passes. A readable
+            // descriptor at EOF stays readable, so select() would spin at full
+            // speed - it has to be an exit.
+            if (bytes == 0) {
+                fprintf(stderr, "target process ended\n");
                 break;
+            }
+
+            if (bytes > 0) {
+                len = encode_hybi(cin_buf, bytes, cout_buf, BUFSIZE);
+
+                if (len < 0) {
+                    fprintf(stderr, "encoding error\n");
+                    break;
+                }
+
+                int ret = ws_send(sockfd, ssl, cout_buf, len);
+
+                if (ret < len ) {
+                    fprintf(stderr, "client closed connection\n");
+                    break;
+                }
             }
         }
 
-        // GRACE_TIME is the usleep() argument and so is microseconds, not
-        // milliseconds: with 1000 here this pinged every ~5ms instead of every
-        // CONN_TIMEOUT seconds, flooding the client with pings to pong back.
-        if (  iter % ( (CONN_TIMEOUT * 1000000 ) / GRACE_TIME ) == 0) {
-            uint8_t ping[] = {0x89, 0x05, 0x48, 0x65, 0x6c, 0x6c, 0x6f};
+        // Off the clock rather than off an iteration count, which is no longer
+        // a fixed unit of time. Starting at zero keeps the original behaviour
+        // of pinging once immediately.
+        {
+            time_t now = time(NULL);
 
-            if (ws_send(sockfd, ssl, ping, 7) < 7) {
-                break;
+            if (now - last_ping >= CONN_TIMEOUT) {
+                uint8_t ping[] = {0x89, 0x05, 0x48, 0x65, 0x6c, 0x6c, 0x6f};
+                last_ping = now;
+
+                if (ws_send(sockfd, ssl, ping, 7) < 7) {
+                    break;
+                }
             }
         }
 
-        drain_client(sockfd, ssl);
-        usleep(GRACE_TIME);
+        // Only when there is actually something to drain. This is what used to
+        // toggle O_NONBLOCK on and off twice per pass, and it is where most of
+        // those fcntl calls came from.
+        if (ready > 0 && FD_ISSET(sockfd, &rd)) {
+            drain_client(sockfd, ssl);
+        }
     }
 
     kill(child_pid, SIGKILL);
